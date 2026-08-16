@@ -521,6 +521,19 @@ function bindStatic() {
   });
   $('prove-btn').addEventListener('click', runProve);
 
+  // Tresorit Send: jump to Create with the file link prefilled
+  $('seal-tresorit-btn').addEventListener('click', () => {
+    const v = $('tresorit-link-in').value.trim();
+    if (!/^https?:\/\//i.test(v)) {
+      $('tresorit-link-in').focus();
+      return;
+    }
+    showView('create');
+    $('payload').value = v;
+    $('payload').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    $('pw').focus();
+  });
+
   // create
   $('create-form').addEventListener('submit', onCreate);
   $('pw-toggle').addEventListener('click', () => {

@@ -328,6 +328,15 @@ ol.howto {
 }
 ol.howto li { margin: 0.45rem 0; }
 ol.howto code { word-break: break-all; }
+
+/* "make it unidentifiable" nested block */
+.seal-nested {
+  margin-top: 1.4rem;
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--line);
+}
+.seal-nested h2 { margin-top: 0; }
+.seal-nested .primary { margin-top: 0.6rem; }
 code { background: rgba(0, 0, 0, 0.05); padding: 0.05rem 0.3rem; border-radius: 6px; font-size: 0.9em; }
 
 #prove-out {

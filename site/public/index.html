@@ -81,8 +81,8 @@
         </div>
       </div>
       <p class="footnote">Your link and password never reach our server. Ever. <a id="footer-prove" href="#">See for yourself</a>.<br>
-        Sharing a file instead? <a href="https://send.tresorit.com/" target="_blank" rel="noopener noreferrer">Tresorit Send</a>
-        gives files the same unreadable-link treatment.</p>
+        Sharing a file instead? Seal the <a href="https://send.tresorit.com/" target="_blank" rel="noopener noreferrer">Tresorit Send</a>
+        link here — the result looks like any other link.</p>
     </section>
 
     <!-- ============ OPEN ============ -->
@@ -263,6 +263,18 @@
           <li>Share the link. Send the password (if you set one) separately — same rule as here.</li>
         </ol>
         <p class="hint">Encryption happens in your browser before anything is uploaded; Tresorit never sees the file contents.</p>
+
+        <div class="seal-nested">
+          <h2>Make it unidentifiable</h2>
+          <p>Even a Tresorit link still <em>says</em> "send.tresorit.com" — a giveaway that it's a file.
+            Seal it here instead: the result is indistinguishable from any other Magic Router link.
+            Nobody can tell it's a file, or which service is behind it.</p>
+          <label class="field">
+            <span class="field-label">Paste your Tresorit Send link</span>
+            <input id="tresorit-link-in" type="text" placeholder="https://send.tresorit.com/a#…">
+          </label>
+          <button id="seal-tresorit-btn" class="primary" type="button">Seal this link →</button>
+        </div>
       </div>
       <div class="panel faq">
         <h2>Where is my data stored?</h2>
