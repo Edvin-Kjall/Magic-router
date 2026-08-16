@@ -339,6 +339,13 @@ async function beginOpen(envStr, tail, hostedMeta) {
   const d = describeEnvelope(env);
 
   $('open-host').textContent = d.host ? `→ ${d.host}` : '';
+  const scanLine = $('open-scan-line');
+  if (d.host) {
+    scanLine.hidden = false;
+    $('open-scan-link').href = `https://urlscan.io/domain/${encodeURIComponent(d.host)}`;
+  } else {
+    scanLine.hidden = true;
+  }
   $('open-note').hidden = !d.note;
   $('open-note').textContent = d.note ? `“${d.note}”` : '';
   const ex = expiryStatus(env.meta);
@@ -454,6 +461,9 @@ function showResult(r, env) {
     }
     $('continue-host').textContent = host;
     $('continue-btn').onclick = () => location.replace(r.data);
+    $('scan-btn').onclick = () => {
+      window.open('https://urlscan.io/search/#' + encodeURIComponent(r.data), '_blank', 'noopener,noreferrer');
+    };
   } else {
     $('result-url-wrap').hidden = true;
     $('result-text-wrap').hidden = false;
