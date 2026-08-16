@@ -4,22 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-91upTlZrgX2HiD61+O4vyhg8kRh74N2en0v/hJKa/rQ=' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
   <meta name="description" content="Encrypted links that store themselves. No database, no tracking — the link carries its own AES-256-GCM encrypted destination.">
   <title>Magic Router — encrypted links that store themselves</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
-  <script type="importmap">
-  {
-    "imports": {
-      "hash-wasm": "/vendor/hash-wasm.js",
-      "@noble/post-quantum/ml-kem.js": "/vendor/noble-pq.js",
-      "@noble/post-quantum/ml-dsa.js": "/vendor/noble-pq.js",
-      "qrcode": "/vendor/qrcode.js"
-    }
-  }
-  </script>
-</head>
+  </head>
 <body>
   <header class="topbar">
     <div class="brand" id="brand-home" role="button" tabindex="0">
@@ -242,6 +232,6 @@
     <p class="hint">Encryption and sealing happen entirely in your browser. This server stores nothing.</p>
   </footer>
 
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="/bundle.js"></script>
 </body>
 </html>

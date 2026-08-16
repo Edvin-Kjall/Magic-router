@@ -6,9 +6,9 @@ import { build } from 'esbuild';
 import { mkdirSync } from 'node:fs';
 
 const targets = [
-  ['vendor-entries/hash-wasm.js', 'site/public/vendor/hash-wasm.mjs'],
-  ['vendor-entries/noble-pq.js', 'site/public/vendor/noble-pq.mjs'],
-  ['vendor-entries/qrcode.js', 'site/public/vendor/qrcode.mjs'],
+  ['vendor-entries/hash-wasm.js', 'site/public/vendor/hash-wasm.js'],
+  ['vendor-entries/noble-pq.js', 'site/public/vendor/noble-pq.js'],
+  ['vendor-entries/qrcode.js', 'site/public/vendor/qrcode.js'],
 ];
 
 mkdirSync('site/public/vendor', { recursive: true });

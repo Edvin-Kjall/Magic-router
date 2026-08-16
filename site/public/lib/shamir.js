@@ -3,7 +3,7 @@
 // each share wrapped by a different unlock method; any m shares
 // reconstruct the key. Fully client-side, no storage.
 
-import { randomBytes } from './b64.mjs';
+import { randomBytes } from './b64.js';
 
 const EXP = new Uint8Array(512);
 const LOG = new Uint8Array(256);

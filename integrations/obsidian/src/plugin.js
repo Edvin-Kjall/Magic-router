@@ -1,8 +1,8 @@
 // Obsidian plugin: "Seal link" command — seals the selection (or a pasted
 // URL) with a password and copies the sealed link to the clipboard.
-// Bundled with esbuild (see esbuild.config.mjs) into a single dist/main.js.
+// Bundled with esbuild (see esbuild.config.js) into a single dist/main.js.
 import { Modal, Notice, Plugin, Setting } from 'obsidian';
-import { seal, encodeEnvelope } from '../../site/public/lib/envelope.mjs';
+import { seal, encodeEnvelope } from '../../site/public/lib/envelope.js';
 
 // Your Magic Router deployment origin (or a self-hosted instance).
 const HOST = 'https://YOUR-HOST';

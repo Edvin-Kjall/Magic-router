@@ -21,11 +21,11 @@ import {
   randomBytes,
   concatBytes,
   xorBytes,
-} from './b64.mjs';
-import { deriveKey, ARGON2ID } from './kd.mjs';
-import { aesEncrypt, aesDecrypt, importAesKey } from './aes.mjs';
-import { splitSecret, combineShares } from './shamir.mjs';
-import { hashChain } from './timelock.mjs';
+} from './b64.js';
+import { deriveKey, ARGON2ID } from './kd.js';
+import { aesEncrypt, aesDecrypt, importAesKey } from './aes.js';
+import { splitSecret, combineShares } from './shamir.js';
+import { hashChain } from './timelock.js';
 
 export const PREFIX = 's3.';
 export const VERSION = 3;

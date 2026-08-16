@@ -7,7 +7,7 @@
 // the page's JavaScript to skip the wait. This is a fair-use time lock,
 // not a tamper-proof one.
 
-import { concatBytes } from './b64.mjs';
+import { concatBytes } from './b64.js';
 
 async function sha256(bytes) {
   return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));

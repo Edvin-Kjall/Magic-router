@@ -33,8 +33,8 @@ import {
   parseDuration,
   expiryStatus,
   SealError,
-} from '../site/public/lib/envelope.mjs';
-import { estimateHashRate, formatDuration } from '../site/public/lib/timelock.mjs';
+} from '../site/public/lib/envelope.js';
+import { estimateHashRate, formatDuration } from '../site/public/lib/timelock.js';
 import { toString as qrTerminal } from 'qrcode';
 
 const here = dirname(fileURLToPath(import.meta.url));

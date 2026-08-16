@@ -1,6 +1,6 @@
 // AES-256-GCM helpers on top of WebCrypto.
 
-import { concatBytes, randomBytes } from './b64.mjs';
+import { concatBytes, randomBytes } from './b64.js';
 
 export function importAesKey(raw) {
   return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);

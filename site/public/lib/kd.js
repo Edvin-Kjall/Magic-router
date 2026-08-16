@@ -7,7 +7,7 @@
 // node_modules. Same source, both runtimes.
 
 import { argon2id } from 'hash-wasm';
-import { b64uToBytes, toBytes } from './b64.mjs';
+import { b64uToBytes, toBytes } from './b64.js';
 
 export const ARGON2ID = Object.freeze({ algo: 'argon2id', m: 65536, t: 3, p: 1 });
 export const ARGON2ID_FAST = Object.freeze({ algo: 'argon2id', m: 8192, t: 1, p: 1 }); // tests / CI only

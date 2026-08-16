@@ -17,8 +17,8 @@ import {
   parseDuration,
   expiryStatus,
   SealError,
-} from '/lib/envelope.mjs';
-import { estimateHashRate, formatDuration } from '/lib/timelock.mjs';
+} from './lib/envelope.js';
+import { estimateHashRate, formatDuration } from './lib/timelock.js';
 import { toCanvas } from 'qrcode';
 
 const CFG = {
@@ -75,7 +75,8 @@ function download(name, text) {
 
 async function loadWordlist() {
   if (wordlist) return wordlist;
-  const res = await fetch('/data/eff-large.txt');
+  let res = await fetch('/eff-large.txt');
+  if (!res.ok) res = await fetch('/data/eff-large.txt');
   if (!res.ok) throw new Error('wordlist unavailable');
   const text = await res.text();
   wordlist = text

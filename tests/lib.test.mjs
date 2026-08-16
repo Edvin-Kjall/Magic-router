@@ -4,11 +4,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
 
-import { bytesToB64u, b64uToBytes, randomBytes, concatBytes } from '../site/public/lib/b64.mjs';
-import { ARGON2ID_FAST } from '../site/public/lib/kd.mjs';
-import { deriveKey } from '../site/public/lib/kd.mjs';
-import { aesEncrypt } from '../site/public/lib/aes.mjs';
-import { splitSecret, combineShares } from '../site/public/lib/shamir.mjs';
+import { bytesToB64u, b64uToBytes, randomBytes, concatBytes } from '../site/public/lib/b64.js';
+import { ARGON2ID_FAST } from '../site/public/lib/kd.js';
+import { deriveKey } from '../site/public/lib/kd.js';
+import { aesEncrypt } from '../site/public/lib/aes.js';
+import { splitSecret, combineShares } from '../site/public/lib/shamir.js';
 import {
   seal,
   open,
@@ -22,7 +22,7 @@ import {
   verifySignatures,
   makeTimeLock,
   isSealedLink,
-} from '../site/public/lib/envelope.mjs';
+} from '../site/public/lib/envelope.js';
 
 const KDF = ARGON2ID_FAST;
 const URL = 'https://example.com/very/secret/path?token=abc123';
