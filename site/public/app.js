@@ -463,18 +463,21 @@ function showResult(r, env) {
     }
     $('continue-host').textContent = host;
     $('continue-btn').onclick = () => location.replace(r.data);
-    // urlscan.io's search parser cannot take a full URL (its ":"/"-" syntax
-    // breaks) — search by domain instead; the results page offers a fresh
-    // scan submission for the exact URL.
+    // Third-party checks — all free, no account required.
+    // urlscan.io and VirusTotal search by domain (their parsers reject full
+    // URLs); Google Safe Browsing takes the exact URL.
+    let scanHost = host;
+    try {
+      scanHost = new URL(r.data).hostname;
+    } catch {
+      /* raw string */
+    }
     $('scan-btn').onclick = () => {
-      let scanHost = host;
-      try {
-        scanHost = new URL(r.data).hostname;
-      } catch {
-        /* raw string */
-      }
       window.open('https://urlscan.io/search/#' + encodeURIComponent(scanHost), '_blank', 'noopener,noreferrer');
     };
+    $('vt-link').href = 'https://www.virustotal.com/gui/search/' + encodeURIComponent(scanHost);
+    $('gsb-link').href =
+      'https://transparencyreport.google.com/safe-browsing/search?url=' + encodeURIComponent(r.data);
   } else {
     $('result-url-wrap').hidden = true;
     $('result-text-wrap').hidden = false;
