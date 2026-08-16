@@ -463,8 +463,17 @@ function showResult(r, env) {
     }
     $('continue-host').textContent = host;
     $('continue-btn').onclick = () => location.replace(r.data);
+    // urlscan.io's search parser cannot take a full URL (its ":"/"-" syntax
+    // breaks) — search by domain instead; the results page offers a fresh
+    // scan submission for the exact URL.
     $('scan-btn').onclick = () => {
-      window.open('https://urlscan.io/search/#' + encodeURIComponent(r.data), '_blank', 'noopener,noreferrer');
+      let scanHost = host;
+      try {
+        scanHost = new URL(r.data).hostname;
+      } catch {
+        /* raw string */
+      }
+      window.open('https://urlscan.io/search/#' + encodeURIComponent(scanHost), '_blank', 'noopener,noreferrer');
     };
   } else {
     $('result-url-wrap').hidden = true;
