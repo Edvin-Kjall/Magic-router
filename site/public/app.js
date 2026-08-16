@@ -107,7 +107,7 @@ function activeAdvanced() {
   if ($('adv-embed').checked) out.push('Auto-open');
   if ($('adv-timelock').value !== 'off') out.push('Time-lock ' + $('adv-timelock').value);
   if ($('adv-expiry').value) out.push('Expires');
-  if ($('adv-sign').checked) out.push('Signed');
+  if ($('adv-sign').checked) out.push('Signed' + ($('adv-sign-pq').checked ? ' (PQ)' : ''));
   if ($('adv-note').value.trim()) out.push('Note');
   if ($('adv-path').checked) out.push('Path-style');
   return out;
@@ -125,7 +125,7 @@ function updateAdvancedSummary() {
 }
 
 function clearAdvanced() {
-  for (const id of ['adv-prf', 'adv-pub', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-path']) {
+  for (const id of ['adv-prf', 'adv-pub', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-sign-pq', 'adv-path']) {
     $(id).checked = false;
   }
   $('adv-timelock').value = 'off';
@@ -145,6 +145,7 @@ function refreshAdvancedRows() {
   $('adv-pub-row').hidden = !$('adv-pub').checked;
   $('adv-pw2-row').hidden = !$('adv-pw2').checked;
   $('adv-sign-row').hidden = !$('adv-sign').checked;
+  $('adv-sign-pq').closest('.switch-row').hidden = !$('adv-sign').checked;
   $('adv-thr').disabled = !($('adv-prf').checked || $('adv-pub').checked || $('adv-pw2').checked);
 }
 
@@ -214,6 +215,7 @@ async function onCreate(e) {
     if ($('adv-sign').checked) {
       if (!signerIdentity) throw new SealError('Signing is on — generate or upload an identity (Advanced tab).');
       opts.signer = signerIdentity;
+      opts.pq = $('adv-sign-pq').checked;
     }
 
     const env = await seal(opts);
@@ -351,8 +353,19 @@ async function beginOpen(envStr, tail, hostedMeta) {
   const sigs = await verifySignatures(env);
   $('open-sig-results').hidden = !sigs.length;
   if (sigs.length) {
-    $('open-sig-results').textContent =
-      'Sealed by ' + sigs.map((s) => `${s.name} (${s.ok ? '✓' : 'signature invalid ✗'})`).join(', ');
+    // Group by name: "Sealed by alice ✓ (Ed25519 + ML-DSA-65)" or ✗.
+    const byName = new Map();
+    for (const s of sigs) {
+      if (!byName.has(s.name)) byName.set(s.name, []);
+      byName.get(s.name).push(s);
+    }
+    const parts = [];
+    for (const [name, list] of byName) {
+      const ok = list.every((s) => s.ok);
+      const algs = list.map((s) => s.alg).join(' + ');
+      parts.push(`${name} ${ok ? '✓' : '— signature invalid ✗'} (${algs})`);
+    }
+    $('open-sig-results').textContent = 'Sealed by ' + parts.join(', ');
   }
 
   $('open-thr').hidden = !env.thr;
@@ -370,6 +383,12 @@ async function beginOpen(envStr, tail, hostedMeta) {
     $('open-err').hidden = true;
     try {
       const r = await open(envStr, { embeddedPassword: tail });
+      // Auto-open mode: the password traveled in the link, so redirect
+      // straight to the destination. Secret text still shows here.
+      if (r.type === 'url') {
+        location.replace(r.data);
+        return;
+      }
       showResult(r, env);
       return;
     } catch (e2) {
@@ -530,7 +549,7 @@ function bindStatic() {
   });
 
   // advanced
-  for (const id of ['adv-prf', 'adv-pub', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-path']) {
+  for (const id of ['adv-prf', 'adv-pub', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-sign-pq', 'adv-path']) {
     $(id).addEventListener('change', () => {
       refreshAdvancedRows();
       updateAdvancedSummary();

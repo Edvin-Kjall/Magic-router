@@ -27,6 +27,7 @@
       <span class="brand-name">Magic Router</span>
     </div>
     <nav>
+      <button class="nav-btn active" data-view="create">Create</button>
       <button class="nav-btn" data-view="advanced">Advanced</button>
       <button class="nav-btn" data-view="about">Security</button>
     </nav>
@@ -172,7 +173,7 @@
         </label>
 
         <label class="switch-row">
-          <span class="switch-copy"><strong>Auto-open link</strong><small>Password travels inside the link — anyone with the link can open it. Convenience, not secrecy.</small></span>
+          <span class="switch-copy"><strong>Auto-open link</strong><small>Password travels inside the link and it opens the destination immediately. Anyone with the link can open it — convenience, not secrecy.</small></span>
           <input type="checkbox" id="adv-embed"><span class="switch"></span>
         </label>
       </div>
@@ -210,10 +211,14 @@
         <div class="indent" id="adv-sign-row" hidden>
           <label class="field"><span class="field-label">Name</span>
             <input id="adv-identity-name" type="text" placeholder="Your handle"></label>
-          <label class="field"><span class="field-label">Identity file (or generate one)</span>
+          <label class="field"><span class="field-label">Identity file (the JSON generated below — upload it later to sign with the same name)</span>
             <input id="adv-identity-file" type="file" accept=".json,application/json"></label>
           <button type="button" id="gen-identity" class="text-btn">Generate identity</button>
           <p class="hint" id="identity-status"></p>
+          <label class="switch-row">
+            <span class="switch-copy"><strong>Post-quantum signature</strong><small>Also signs with ML-DSA-65. Quantum-resistant, but adds about 7 KB to the link.</small></span>
+            <input type="checkbox" id="adv-sign-pq"><span class="switch"></span>
+          </label>
         </div>
       </div>
 

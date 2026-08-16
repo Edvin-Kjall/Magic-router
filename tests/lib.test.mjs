@@ -165,6 +165,8 @@ test('signed seals verify; tampered payload invalidates', async () => {
   assert.equal(results.length >= 1, true);
   assert.ok(results.every((r) => r.ok));
   assert.equal(results[0].name, 'alice');
+  // default is Ed25519 only — links stay short
+  assert.ok(str.length < 800, `ed25519-only signed link should be short, got ${str.length}`);
 
   // tamper with payload: signatures must fail
   const ct = b64uToBytes(parsed.payload.ct);
@@ -178,6 +180,18 @@ test('signed seals verify; tampered payload invalidates', async () => {
   parsed2.meta.note = 'forged';
   const bad2 = await verifySignatures(parsed2);
   assert.ok(bad2.some((r) => r.ok === false));
+});
+
+test('post-quantum signature (pq: true) adds ML-DSA-65 and verifies', async () => {
+  const id = await generateSignerIdentity('pqalice');
+  const env = await seal({ type: 'url', data: URL, passwords: ['pw'], kdf: KDF, signer: id, pq: true });
+  const str = await encodeEnvelope(env);
+  assert.ok(str.length > 3000, `pq signed link should be large, got ${str.length}`);
+  const parsed = await decodeEnvelope(str);
+  const algs = parsed.meta.sig.map((s) => s.alg).sort();
+  assert.deepEqual(algs, ['ed25519', 'mldsa65']);
+  const results = await verifySignatures(parsed);
+  assert.ok(results.every((r) => r.ok));
 });
 
 test('legacy v2 links (argon2id, deflate-compressed) still open', async () => {

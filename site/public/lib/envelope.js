@@ -326,7 +326,12 @@ async function normalizePrivate(priv) {
 // ------------------------------------------------------------ identities
 
 export async function generateSignerIdentity(name) {
-  const ed = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+  let ed = null;
+  try {
+    ed = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+  } catch {
+    ed = null;
+  }
   let mldsa = null;
   try {
     const { ml_dsa65 } = await import('@noble/post-quantum/ml-dsa.js');
@@ -338,28 +343,36 @@ export async function generateSignerIdentity(name) {
   } catch {
     mldsa = null;
   }
+  if (!ed && !mldsa) throw new SealError('no signature algorithm available in this browser');
   return {
     v: 1,
     name: String(name),
-    ed25519: {
-      pub: bytesToB64u(new Uint8Array(await crypto.subtle.exportKey('raw', ed.publicKey))),
-      priv: bytesToB64u(new Uint8Array(await crypto.subtle.exportKey('pkcs8', ed.privateKey))),
-    },
+    ed25519: ed
+      ? {
+          pub: bytesToB64u(new Uint8Array(await crypto.subtle.exportKey('raw', ed.publicKey))),
+          priv: bytesToB64u(new Uint8Array(await crypto.subtle.exportKey('pkcs8', ed.privateKey))),
+        }
+      : null,
     mldsa65: mldsa,
   };
 }
 
-export async function signEnvelope(env, identity) {
+// opts.pq: also add the ML-DSA-65 signature. Post-quantum, but the extra
+// signature + public key add ~7 KB to the link, so it is opt-in — Ed25519
+// alone keeps signed links short.
+export async function signEnvelope(env, identity, opts = {}) {
   const msg = toBytes(canonicalize(env));
   const sigs = [];
-  try {
-    const priv = await crypto.subtle.importKey('pkcs8', b64uToBytes(identity.ed25519.priv), { name: 'Ed25519' }, false, ['sign']);
-    const sig = new Uint8Array(await crypto.subtle.sign({ name: 'Ed25519' }, priv, msg));
-    sigs.push({ alg: 'ed25519', name: identity.name, pk: identity.ed25519.pub, sig: bytesToB64u(sig) });
-  } catch {
-    /* skip ed25519 if unavailable */
+  if (identity.ed25519?.priv) {
+    try {
+      const priv = await crypto.subtle.importKey('pkcs8', b64uToBytes(identity.ed25519.priv), { name: 'Ed25519' }, false, ['sign']);
+      const sig = new Uint8Array(await crypto.subtle.sign({ name: 'Ed25519' }, priv, msg));
+      sigs.push({ alg: 'ed25519', name: identity.name, pk: identity.ed25519.pub, sig: bytesToB64u(sig) });
+    } catch {
+      /* skip ed25519 if unavailable */
+    }
   }
-  if (identity.mldsa65?.priv) {
+  if (opts.pq && identity.mldsa65?.priv) {
     try {
       const { ml_dsa65 } = await import('@noble/post-quantum/ml-dsa.js');
       const sig = await ml_dsa65.sign(msg, b64uToBytes(identity.mldsa65.priv));
@@ -417,6 +430,7 @@ export async function seal(opts = {}) {
     note = null,
     kdf = KDF_DEFAULT,
     signer = null,
+    pq = false,
   } = opts;
 
   if (!data) throw new SealError('seal: data is required');
@@ -475,7 +489,7 @@ export async function seal(opts = {}) {
 
   const key = await importAesKey(payloadKey);
   env.payload = { ct: bytesToB64u(await aesEncrypt(key, toBytes(String(data)))) };
-  if (signer) await signEnvelope(env, signer);
+  if (signer) await signEnvelope(env, signer, { pq });
   return env;
 }
 
