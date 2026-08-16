@@ -1,5 +1,6 @@
-// Magic Router — all UI logic. Encryption, decryption and key derivation
-// run entirely in this browser; the server only ever serves static files.
+// Magic Router — UI logic. Quiet on the surface: one input, one button.
+// Everything exotic lives in the Advanced tab and feeds the same seal flow.
+// Encryption, decryption and key derivation run entirely in this browser.
 
 import {
   seal,
@@ -28,15 +29,16 @@ const CFG = {
 
 const $ = (id) => document.getElementById(id);
 
-let hashRate = 0; // SHA-256 chain hashes/sec on this device
-let signerIdentity = null; // {name, ed25519, mldsa65}
+let hashRate = 0;
+let signerIdentity = null; // { name, ed25519, mldsa65 }
 let currentLink = null; // { str, env?, tail, mode, hostedMeta? }
 let wordlist = null;
+let qrRendered = false;
 
 // ------------------------------------------------------------- helpers
 
 function showView(name) {
-  for (const v of ['create', 'open', 'prove', 'faq']) {
+  for (const v of ['create', 'open', 'advanced', 'about']) {
     $('view-' + v).hidden = v !== name;
   }
   for (const b of document.querySelectorAll('.nav-btn')) {
@@ -44,17 +46,11 @@ function showView(name) {
   }
 }
 
-function err(e) {
-  const box = $('create-err');
-  const box2 = $('open-err');
+function err(e, target = 'create') {
+  const box = $(target === 'create' ? 'create-err' : 'open-err');
   const msg = e instanceof SealError ? e.message : e?.message || String(e);
-  if (!$('view-create').hidden) {
-    box.textContent = '⚠ ' + msg;
-    box.hidden = false;
-  } else {
-    box2.textContent = '⚠ ' + msg;
-    box2.hidden = false;
-  }
+  box.textContent = msg;
+  box.hidden = false;
 }
 
 async function readFileText(input) {
@@ -79,10 +75,7 @@ async function loadWordlist() {
   if (!res.ok) res = await fetch('/data/eff-large.txt');
   if (!res.ok) throw new Error('wordlist unavailable');
   const text = await res.text();
-  wordlist = text
-    .split('\n')
-    .map((l) => l.split('\t')[1])
-    .filter(Boolean);
+  wordlist = text.split('\n').map((l) => l.split('\t')[1]).filter(Boolean);
   return wordlist;
 }
 
@@ -103,143 +96,166 @@ async function generatePassphrase(words = 8) {
   return out.join(' ');
 }
 
-// -------------------------------------------------------- create: methods
+// -------------------------------------------------------- advanced state
 
-function addMethodRow(kind) {
-  const row = document.createElement('div');
-  row.className = 'method-row';
-  row.dataset.kind = kind;
-  const label = document.createElement('span');
-  label.className = 'kind-label';
-  label.textContent = { pass: 'password', embed: 'embedded pw', prf: 'passkey', pub: 'recipient key' }[kind];
-  row.appendChild(label);
-
-  if (kind === 'pass' || kind === 'embed') {
-    const input = document.createElement('input');
-    input.type = 'password';
-    input.placeholder =
-      kind === 'pass' ? 'password for the recipient' : 'password riding in the link (auto-open)';
-    input.autocomplete = 'new-password';
-    row.appendChild(input);
-  } else if (kind === 'prf') {
-    const p = document.createElement('span');
-    p.className = 'hint';
-    p.textContent = 'the recipient unlocks with Touch ID / Windows Hello — enrollment happens on create';
-    row.appendChild(p);
-  } else if (kind === 'pub') {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.json,application/json';
-    input.title = 'recipient’s public key file (seal-key.json)';
-    row.appendChild(input);
-  }
-  const rm = document.createElement('button');
-  rm.type = 'button';
-  rm.className = 'remove';
-  rm.textContent = '✕';
-  rm.title = 'remove';
-  rm.addEventListener('click', () => {
-    row.remove();
-    updateThresholdUI();
-  });
-  row.appendChild(rm);
-  $('methods').appendChild(row);
-  updateThresholdUI();
-}
-
-function updateThresholdUI() {
-  const rows = [...document.querySelectorAll('#methods .method-row')];
-  const n = rows.length;
-  $('methods-count').textContent = n ? `${n} method${n > 1 ? 's' : ''} — any one unlocks` : '';
-  const wrap = $('threshold-wrap');
-  wrap.hidden = n < 2;
-  if (n >= 2) $('threshold').max = n;
-}
-
-function collectMethods() {
-  const out = { passwords: [], embedded: null, recipient: null, prf: false };
-  for (const row of document.querySelectorAll('#methods .method-row')) {
-    const kind = row.dataset.kind;
-    if (kind === 'pass') {
-      const v = row.querySelector('input').value;
-      if (v) out.passwords.push(v);
-    } else if (kind === 'embed') {
-      const v = row.querySelector('input').value;
-      if (v) out.embedded = v;
-    } else if (kind === 'prf') {
-      out.prf = true;
-    } else if (kind === 'pub') {
-      const f = row.querySelector('input').files?.[0];
-      if (f) out.recipient = f;
-    }
-  }
+function activeAdvanced() {
+  const out = [];
+  if ($('adv-prf').checked) out.push('Passkey');
+  if ($('adv-pub').checked) out.push('Recipient key');
+  if ($('adv-pw2').checked) out.push('Second password');
+  if ($('adv-thr').checked) out.push('Require all');
+  if ($('adv-embed').checked) out.push('Auto-open');
+  if ($('adv-timelock').value !== 'off') out.push('Time-lock ' + $('adv-timelock').value);
+  if ($('adv-expiry').value) out.push('Expires');
+  if ($('adv-sign').checked) out.push('Signed');
+  if ($('adv-note').value.trim()) out.push('Note');
+  if ($('adv-path').checked) out.push('Path-style');
   return out;
 }
 
-// ------------------------------------------------------------ create
+function updateAdvancedSummary() {
+  const items = activeAdvanced();
+  const pill = $('advanced-summary');
+  if (!items.length) {
+    pill.hidden = true;
+    return;
+  }
+  $('advanced-summary-text').textContent = 'Advanced on: ' + items.join(' · ');
+  pill.hidden = false;
+}
+
+function clearAdvanced() {
+  for (const id of ['adv-prf', 'adv-pub', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-path']) {
+    $(id).checked = false;
+  }
+  $('adv-timelock').value = 'off';
+  $('adv-expiry').value = '';
+  $('adv-note').value = '';
+  $('adv-pw2-value').value = '';
+  $('adv-pub-file').value = '';
+  $('adv-identity-file').value = '';
+  $('adv-identity-name').value = '';
+  signerIdentity = null;
+  $('identity-status').textContent = '';
+  refreshAdvancedRows();
+  updateAdvancedSummary();
+}
+
+function refreshAdvancedRows() {
+  $('adv-pub-row').hidden = !$('adv-pub').checked;
+  $('adv-pw2-row').hidden = !$('adv-pw2').checked;
+  $('adv-sign-row').hidden = !$('adv-sign').checked;
+  $('adv-thr').disabled = !($('adv-prf').checked || $('adv-pub').checked || $('adv-pw2').checked);
+}
+
+// ------------------------------------------------------------- create
+
+function buildSealOpts() {
+  const raw = $('payload').value.trim();
+  if (!raw) throw new SealError('What are you protecting? Paste a link or a secret first.');
+  const type = /^https?:\/\//i.test(raw) ? 'url' : 'text';
+  const opts = { type, data: raw };
+
+  const pw = $('pw').value;
+  const passwords = [];
+  let methodCount = 0;
+
+  if ($('adv-embed').checked) {
+    if (!pw) throw new SealError('Auto-open uses the password field — type one first.');
+    opts.embedded = pw;
+    methodCount++;
+  } else if (pw) {
+    passwords.push(pw);
+    methodCount++;
+  }
+  if ($('adv-pw2').checked) {
+    const p2 = $('adv-pw2-value').value;
+    if (!p2) throw new SealError('Second password is on — fill in their password (Advanced tab).');
+    passwords.push(p2);
+    methodCount++;
+  }
+  if ($('adv-prf').checked) {
+    opts.prf = true;
+    methodCount++;
+  }
+  if ($('adv-pub').checked) {
+    const f = $('adv-pub-file').files?.[0];
+    if (!f) throw new SealError('Recipient key is on — pick their public key file (Advanced tab).');
+    opts.recipient = f;
+    methodCount++;
+  }
+  if (passwords.length) opts.passwords = passwords;
+  if (!methodCount) throw new SealError('Add a password first — or use Advanced for passkeys and keys.');
+
+  if ($('adv-thr').checked) {
+    if (methodCount < 2) throw new SealError('"Require every method" needs at least two methods.');
+    opts.threshold = methodCount;
+  }
+  const tl = $('adv-timelock').value;
+  return { opts, tl };
+}
 
 async function onCreate(e) {
   e.preventDefault();
-  const errBox = $('create-err');
-  errBox.hidden = true;
+  $('create-err').hidden = true;
   const btn = $('create-btn');
   btn.disabled = true;
   btn.textContent = 'Sealing…';
   try {
-    const type = document.querySelector('input[name="payload-type"]:checked').value;
-    const data =
-      type === 'url' ? $('payload-url').value.trim() : $('payload-text').value.trim();
-    if (!data) throw new SealError('Enter a destination URL or secret text first');
-
-    const m = collectMethods();
-    const opts = { type, data };
-    if (m.passwords.length) opts.passwords = m.passwords;
-    if (m.embedded != null) opts.embedded = m.embedded;
-    if (m.prf) opts.prf = true;
-    if (m.recipient) {
-      opts.recipient = JSON.parse(await m.recipient.text());
+    const { opts, tl } = buildSealOpts();
+    if (opts.recipient instanceof File) {
+      opts.recipient = JSON.parse(await opts.recipient.text());
     }
-    const rows = [...document.querySelectorAll('#methods .method-row')];
-    if (rows.length >= 2) {
-      const thr = Number($('threshold').value);
-      if (thr >= 1) opts.threshold = thr;
+    if (tl !== 'off') {
+      opts.timeLock = await makeTimeLock(parseDuration(tl), hashRate || 1e6);
     }
-    const tlSel = $('timelock').value;
-    if (tlSel !== 'off') {
-      const ms = parseDuration(tlSel);
-      opts.timeLock = await makeTimeLock(ms, hashRate || 1e6);
+    if ($('adv-expiry').value) opts.expiry = $('adv-expiry').value;
+    if ($('adv-note').value.trim()) opts.note = $('adv-note').value.trim();
+    if ($('adv-sign').checked) {
+      if (!signerIdentity) throw new SealError('Signing is on — generate or upload an identity (Advanced tab).');
+      opts.signer = signerIdentity;
     }
-    if ($('expiry').value) opts.expiry = $('expiry').value;
-    if ($('note').value.trim()) opts.note = $('note').value.trim();
-    if (signerIdentity) opts.signer = signerIdentity;
 
     const env = await seal(opts);
     const frag = await encodeEnvelope(env);
     const tail = opts.embedded != null ? '.' + encodeURIComponent(opts.embedded) : '';
     const full = frag + tail;
     currentLink = { str: full, env };
-    const linkUrl = $('path-toggle').checked
+    const linkUrl = $('adv-path').checked
       ? `${location.origin}/_u/${full}`
       : `${location.origin}/#${full}`;
     $('link-out').value = linkUrl;
-    await toCanvas($('qr-canvas'), linkUrl, { width: 240, margin: 1 });
+
+    $('create-form').hidden = true;
     $('create-result').hidden = false;
-    const sealEl = $('wax-seal');
-    sealEl.classList.remove('broken', 'breaking');
-    sealEl.classList.remove('stamping');
-    void sealEl.offsetWidth; // restart animation
-    sealEl.classList.add('stamping');
+    qrRendered = false;
+    $('qr-canvas').hidden = true;
+    $('qr-toggle').textContent = 'Show QR code';
+    const orb = $('seal-orb');
+    orb.classList.remove('stamping');
+    void orb.offsetWidth;
+    orb.classList.add('stamping');
     $('share-btn').hidden = typeof navigator.share !== 'function';
-    $('create-result').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (e2) {
     err(e2);
   } finally {
     btn.disabled = false;
-    btn.textContent = '🕯️ Create sealed link';
+    btn.textContent = 'Seal Link';
   }
 }
 
-// -------------------------------------------------------------- open
+function resetCreate() {
+  $('create-result').hidden = true;
+  $('create-form').hidden = false;
+  $('payload').value = '';
+  $('pw').value = '';
+  $('pw').type = 'password';
+  $('pw-toggle').textContent = '👁';
+  $('create-err').hidden = true;
+  $('seal-orb').classList.remove('stamping');
+}
+
+// --------------------------------------------------------------- open
 
 function detectLink() {
   const path = location.pathname;
@@ -261,12 +277,15 @@ async function route() {
     return;
   }
   showView('open');
+  $('open-sealed').hidden = false;
   $('open-result').hidden = true;
   $('open-gone').hidden = true;
+  $('open-form').hidden = false;
   try {
     if (link.mode === 'hosted') {
       const res = await fetch(`/api/link/${encodeURIComponent(link.slug)}`);
       if (!res.ok) {
+        $('open-form').hidden = true;
         $('open-gone').hidden = false;
         return;
       }
@@ -289,7 +308,7 @@ async function route() {
       await beginOpen(envStr, tail);
     }
   } catch (e2) {
-    err(e2);
+    err(e2, 'open');
   }
 }
 
@@ -297,7 +316,9 @@ function legacyOpen(str) {
   $('open-pw-wrap').hidden = false;
   $('open-keyfile-wrap').hidden = true;
   $('open-passkey-btn').hidden = true;
-  $('open-thr').textContent = 'Legacy link (pre-v3 format). Enter the password.';
+  $('open-host').textContent = 'Legacy link';
+  $('open-thr').hidden = false;
+  $('open-thr').textContent = 'An older link format. Enter its password.';
   $('open-form').onsubmit = async (e) => {
     e.preventDefault();
     $('open-err').hidden = true;
@@ -305,7 +326,7 @@ function legacyOpen(str) {
       const r = await openLegacy(str, $('open-pw').value);
       showResult(r, null);
     } catch (e2) {
-      err(e2);
+      err(e2, 'open');
     }
   };
 }
@@ -315,8 +336,7 @@ async function beginOpen(envStr, tail, hostedMeta) {
   currentLink.env = env;
   const d = describeEnvelope(env);
 
-  // meta
-  $('open-host').textContent = d.host ? `→ ${d.host}` : 'destination preview unavailable';
+  $('open-host').textContent = d.host ? `→ ${d.host}` : '';
   $('open-note').hidden = !d.note;
   $('open-note').textContent = d.note ? `“${d.note}”` : '';
   const ex = expiryStatus(env.meta);
@@ -324,36 +344,27 @@ async function beginOpen(envStr, tail, hostedMeta) {
   if (ex) {
     $('open-exp').textContent = ex.expired
       ? ' · expired'
-      : ` · expires ${new Date(ex.at).toLocaleString()}`;
+      : ` · expires ${new Date(ex.at).toLocaleDateString()}`;
   }
+  if (hostedMeta?.fetches != null) $('open-exp').textContent += ` · opened ${hostedMeta.fetches}×`;
 
-  // signatures
   const sigs = await verifySignatures(env);
+  $('open-sig-results').hidden = !sigs.length;
   if (sigs.length) {
-    const names = sigs.map((s) => `${s.name} (${s.alg}: ${s.ok ? 'valid ✓' : 'INVALID ✗'})`);
-    $('open-sig-results').textContent = 'Sealed by ' + names.join(', ');
-  } else {
-    $('open-sig-results').textContent = d.signed.length
-      ? 'Signature check unavailable in this browser'
-      : 'Unsigned link — sealed anonymously';
+    $('open-sig-results').textContent =
+      'Sealed by ' + sigs.map((s) => `${s.name} (${s.ok ? '✓' : 'signature invalid ✗'})`).join(', ');
   }
 
-  // threshold info
+  $('open-thr').hidden = !env.thr;
   if (env.thr) {
-    $('open-thr').textContent = `This link needs ${env.thr.m} of ${env.thr.n} credentials. Provide as many as you have and unlock.`;
-  } else {
-    $('open-thr').textContent = '';
+    $('open-thr').textContent = `This link needs ${env.thr.m} of ${env.thr.n} credentials. Give it what you have and unlock.`;
   }
 
   const kinds = new Set(d.methods);
   $('open-pw-wrap').hidden = !kinds.has('pass');
   $('open-keyfile-wrap').hidden = !kinds.has('pub');
   $('open-passkey-btn').hidden = !kinds.has('prf');
-  if (hostedMeta?.fetches != null) {
-    $('open-exp').textContent += ` · fetched ${hostedMeta.fetches} time(s)`;
-  }
 
-  // embedded password present in the link tail → auto-unlock
   if (kinds.has('embed') && tail) {
     $('open-form').hidden = true;
     $('open-err').hidden = true;
@@ -362,7 +373,7 @@ async function beginOpen(envStr, tail, hostedMeta) {
       showResult(r, env);
       return;
     } catch (e2) {
-      err(e2);
+      err(e2, 'open');
       $('open-form').hidden = false;
     }
   }
@@ -372,9 +383,7 @@ async function beginOpen(envStr, tail, hostedMeta) {
     e.preventDefault();
     await doOpen(envStr, env);
   };
-  $('open-passkey-btn').onclick = async () => {
-    await doOpen(envStr, env);
-  };
+  $('open-passkey-btn').onclick = async () => doOpen(envStr, env);
 }
 
 async function doOpen(envStr, env) {
@@ -386,21 +395,20 @@ async function doOpen(envStr, env) {
     creds.privateKeys = JSON.parse(await readFileText($('open-keyfile')));
   }
 
-  // time-lock UX
   const tl = env.meta?.time;
   if (tl) {
     $('timelock-box').hidden = false;
-    const eta = hashRate ? formatDuration((tl.n / hashRate) * 1000) : 'a while';
-    $('timelock-eta').textContent = `≈ ${eta} on this device`;
+    $('timelock-eta').textContent = hashRate
+      ? `about ${formatDuration((tl.n / hashRate) * 1000)}`
+      : 'a little while';
     $('open-btn').disabled = true;
     $('open-passkey-btn').disabled = true;
   }
-
   try {
     const r = await open(envStr, creds);
     showResult(r, env);
   } catch (e2) {
-    err(e2);
+    err(e2, 'open');
   } finally {
     $('timelock-box').hidden = true;
     $('open-btn').disabled = false;
@@ -409,14 +417,13 @@ async function doOpen(envStr, env) {
 }
 
 function showResult(r, env) {
-  $('open-result').hidden = false;
+  $('open-sealed').hidden = true;
   $('open-form').hidden = true;
   $('open-passkey-btn').hidden = true;
-  const sealEl = $('wax-seal');
-  sealEl.classList.remove('stamping');
-  sealEl.classList.add('broken', 'breaking');
+  $('open-result').hidden = false;
+  const orb = $('seal-orb-open');
+  orb.classList.add('broken');
   if (r.type === 'url') {
-    $('result-title').textContent = 'Unsealed';
     $('result-url-wrap').hidden = false;
     $('result-text-wrap').hidden = true;
     $('result-url').textContent = r.data;
@@ -429,101 +436,135 @@ function showResult(r, env) {
     $('continue-host').textContent = host;
     $('continue-btn').onclick = () => location.replace(r.data);
   } else {
-    $('result-title').textContent = 'Secret text';
     $('result-url-wrap').hidden = true;
     $('result-text-wrap').hidden = false;
     $('result-text').value = r.data;
     $('result-text-copy').onclick = () => {
       navigator.clipboard.writeText(r.data);
-      $('result-text-copy').textContent = 'copied ✓';
+      $('result-text-copy').textContent = 'Copied ✓';
     };
   }
-  if (env?.meta?.sig?.length) {
-    $('result-sig').textContent = `Signed by ${env.meta.sig.map((s) => s.name).join(', ')}`;
-  }
-  $('open-result').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
-// -------------------------------------------------------------- prove
+// --------------------------------------------------------------- prove
 
 async function runProve() {
   const out = $('prove-out');
+  out.hidden = false;
   try {
     const res = await fetch('/api/prove');
     const data = await res.json();
-    out.textContent = JSON.stringify(data, null, 2) + '\n\n// note: the fragment (#...) never appears above because\n// browsers never transmit it. Your link data never reached this server.';
+    out.textContent = JSON.stringify(data, null, 2);
   } catch {
     out.textContent =
-      '// /api/prove is unavailable on this static host.\n' +
-      '// That is itself the proof: this page is a static file. The sealed\n' +
-      '// part of the link lives after "#", and browsers never send fragments\n' +
-      '// to servers. Deploy the Worker (see README) for the live check.';
+      'This static host has no server API — which is itself the proof: everything\n' +
+      'you sealed lives after the "#", and browsers never send fragments to servers.\n' +
+      'Deploy the Worker (see the repo README) for the live confession.';
   }
 }
 
-// --------------------------------------------------------------- init
+// ---------------------------------------------------------------- init
 
 function bindStatic() {
-  $('brand-home').addEventListener('click', () => (location.hash = ''));
+  $('brand-home').addEventListener('click', () => {
+    location.hash = '';
+    showView('create');
+  });
   document.querySelectorAll('.nav-btn').forEach((b) => {
     b.addEventListener('click', () => showView(b.dataset.view));
   });
-  $('source-link').href = CFG.file('site/public/app.js');
+
   $('footer-repo').href = CFG.repo;
   $('footer-spec').href = CFG.file('spec/ENVELOPE.md');
   $('footer-security').href = CFG.file('SECURITY.md');
+  $('footer-prove').addEventListener('click', (e) => {
+    e.preventDefault();
+    showView('about');
+  });
   $('prove-btn').addEventListener('click', runProve);
+
+  // create
+  $('create-form').addEventListener('submit', onCreate);
+  $('pw-toggle').addEventListener('click', () => {
+    const p = $('pw');
+    p.type = p.type === 'password' ? 'text' : 'password';
+    $('pw-toggle').textContent = p.type === 'password' ? '👁' : '🙈';
+  });
+  $('gen-pass').addEventListener('click', async () => {
+    try {
+      const p = $('pw');
+      p.value = await generatePassphrase(8);
+      p.type = 'text';
+      $('pw-toggle').textContent = '🙈';
+    } catch {
+      $('gen-pass').textContent = 'Passphrase list failed to load';
+    }
+  });
   $('copy-btn').addEventListener('click', () => {
     $('link-out').select();
     navigator.clipboard.writeText($('link-out').value).catch(() => document.execCommand('copy'));
+    $('copy-btn').textContent = 'Copied ✓';
+    setTimeout(() => ($('copy-btn').textContent = 'Copy link'), 1500);
   });
   $('share-btn').addEventListener('click', async () => {
     try {
       await navigator.share({ title: 'Sealed link', text: $('link-out').value });
     } catch {
-      /* user cancelled */
+      /* cancelled */
     }
   });
-  $('new-link-btn').addEventListener('click', () => {
-    $('create-result').hidden = true;
-    showView('create');
+  $('new-link-btn').addEventListener('click', resetCreate);
+  $('qr-toggle').addEventListener('click', async () => {
+    const canvas = $('qr-canvas');
+    if (canvas.hidden) {
+      canvas.hidden = false;
+      $('qr-toggle').textContent = 'Hide QR code';
+      if (!qrRendered) {
+        await toCanvas(canvas, $('link-out').value, { width: 240, margin: 1 });
+        qrRendered = true;
+      }
+    } else {
+      canvas.hidden = true;
+      $('qr-toggle').textContent = 'Show QR code';
+    }
   });
-  $('gen-pass-use').addEventListener('click', () => {
-    const last = [...document.querySelectorAll('#methods .method-row input[type="password"]')].pop();
-    if (last) last.value = $('gen-pass-out').value;
-  });
-  document.querySelectorAll('input[name="payload-type"]').forEach((r) => {
-    r.addEventListener('change', () => {
-      const isUrl = document.querySelector('input[name="payload-type"]:checked').value === 'url';
-      $('payload-url').hidden = !isUrl;
-      $('payload-text').hidden = isUrl;
+
+  // advanced
+  for (const id of ['adv-prf', 'adv-pub', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-path']) {
+    $(id).addEventListener('change', () => {
+      refreshAdvancedRows();
+      updateAdvancedSummary();
     });
-  });
-  document.querySelectorAll('[data-method]').forEach((b) => {
-    b.addEventListener('click', () => addMethodRow(b.dataset.method));
-  });
-  $('gen-pass').addEventListener('click', async () => {
+  }
+  for (const id of ['adv-timelock', 'adv-expiry', 'adv-note']) {
+    $(id).addEventListener('change', updateAdvancedSummary);
+  }
+  $('advanced-clear').addEventListener('click', clearAdvanced);
+  $('gen-keypair').addEventListener('click', async () => {
     try {
-      $('gen-pass-out').value = await generatePassphrase(8);
-      $('gen-pass-use').hidden = false;
+      const kp = await generateRecipientKeypair();
+      download('seal-key.json', JSON.stringify(kp, null, 2));
+      $('identity-status').textContent =
+        'Key pair downloaded. Give seal-key.json to the recipient; to seal TO them, upload the same file above.';
     } catch (e2) {
-      $('gen-pass-out').placeholder = 'wordlist failed to load';
+      $('identity-status').textContent = '⚠ key generation failed in this browser';
     }
   });
   $('gen-identity').addEventListener('click', async () => {
     try {
-      const name = $('identity-name').value.trim() || 'anonymous';
+      const name = $('adv-identity-name').value.trim() || 'anonymous';
       const id = await generateSignerIdentity(name);
       signerIdentity = id;
       download(`seal-identity-${name.replace(/\W+/g, '-')}.json`, JSON.stringify(id, null, 2));
-      $('identity-status').textContent = `Identity “${name}” generated (Ed25519 + ML-DSA-65) and downloaded. Links you create will be signed with it.`;
-    } catch (e2) {
+      $('identity-status').textContent = `Identity “${name}” generated and downloaded (Ed25519 + ML-DSA-65).`;
+      updateAdvancedSummary();
+    } catch {
       $('identity-status').textContent = '⚠ identity generation not supported in this browser';
     }
   });
-  $('identity-file').addEventListener('change', async () => {
+  $('adv-identity-file').addEventListener('change', async () => {
     try {
-      const text = await readFileText($('identity-file'));
+      const text = await readFileText($('adv-identity-file'));
       if (!text) return;
       signerIdentity = JSON.parse(text);
       $('identity-status').textContent = `Signing as “${signerIdentity.name}”.`;
@@ -531,20 +572,18 @@ function bindStatic() {
       $('identity-status').textContent = '⚠ could not read identity file';
     }
   });
-  $('create-form').addEventListener('submit', onCreate);
 }
 
 async function init() {
   bindStatic();
-  // prefill from ?url= (Slack, Raycast, shortcuts, bookmarklet)
+  refreshAdvancedRows();
+
   const pre = new URLSearchParams(location.search).get('url');
   if (pre) {
     showView('create');
-    $('payload-url').value = pre;
-    if (![...document.querySelectorAll('#methods .method-row')].length) addMethodRow('pass');
-  } else {
-    addMethodRow('pass');
+    $('payload').value = pre;
   }
+
   estimateHashRate().then((r) => (hashRate = r)).catch(() => {});
   await route();
 }

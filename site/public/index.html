@@ -6,7 +6,7 @@
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-91upTlZrgX2HiD61+O4vyhg8kRh74N2en0v/hJKa/rQ=' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
   <meta name="description" content="Encrypted links that store themselves. No database, no tracking — the link carries its own AES-256-GCM encrypted destination.">
-  <title>Magic Router — encrypted links that store themselves</title>
+  <title>Magic Router</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
   <script type="importmap">
@@ -24,222 +24,241 @@
   <header class="topbar">
     <div class="brand" id="brand-home" role="button" tabindex="0">
       <span class="seal-mini" aria-hidden="true">✦</span>
-      <span class="brand-name">Magic&nbsp;Router</span>
+      <span class="brand-name">Magic Router</span>
     </div>
     <nav>
-      <button class="nav-btn" data-view="create">Seal a link</button>
-      <button class="nav-btn" data-view="prove">Prove it</button>
-      <button class="nav-btn" data-view="faq">Security</button>
+      <button class="nav-btn" data-view="advanced">Advanced</button>
+      <button class="nav-btn" data-view="about">Security</button>
     </nav>
-    <a class="source-link" id="source-link" href="#" target="_blank" rel="noopener">view source</a>
   </header>
 
   <main>
-    <!-- ============ CREATE ============ -->
-    <section id="view-create" class="view" hidden>
-      <h1>Seal a link</h1>
-      <p class="lede">The destination is encrypted into the link itself. This server stores nothing —
-        there is nothing to subpoena, leak, or sell.</p>
+    <!-- ============ DEFAULT ============ -->
+    <section id="view-create" class="view">
+      <div class="hero">
+        <div class="seal-orb" id="seal-orb" aria-hidden="true"><span>✦</span></div>
+        <h1>Send a link only they can open.</h1>
+        <p class="sub">Encrypted into the link itself. Stored nowhere. No accounts, no tracking.</p>
 
-      <form id="create-form" autocomplete="off">
-        <fieldset class="card">
-          <legend>What are you sealing?</legend>
-          <label class="radio"><input type="radio" name="payload-type" value="url" checked> A destination URL</label>
-          <label class="radio"><input type="radio" name="payload-type" value="text"> Secret text (token, API key, message)</label>
-          <input id="payload-url" type="url" inputmode="url" placeholder="https://destination.example/private" autocomplete="off">
-          <textarea id="payload-text" rows="4" placeholder="Paste the secret text here…" hidden></textarea>
-        </fieldset>
+        <form id="create-form" autocomplete="off">
+          <label class="field">
+            <span class="field-label">What are you protecting?</span>
+            <input id="payload" type="text" inputmode="url"
+              placeholder="https://… or a secret you want to share" autocomplete="off">
+          </label>
 
-        <fieldset class="card">
-          <legend>How can it be unlocked? <span class="hint" id="methods-count"></span></legend>
-          <div id="methods"></div>
-          <div class="method-actions">
-            <button type="button" class="mini" data-method="pass">+ password</button>
-            <button type="button" class="mini" data-method="embed">+ embedded password (auto-open)</button>
-            <button type="button" class="mini" data-method="prf">+ passkey</button>
-            <button type="button" class="mini" data-method="pub">+ recipient key</button>
+          <label class="field">
+            <span class="field-label">Password</span>
+            <span class="pw-row">
+              <input id="pw" type="password" placeholder="Only people with it can open the link" autocomplete="new-password">
+              <button type="button" id="pw-toggle" class="ghost" aria-label="Show password">👁</button>
+            </span>
+            <button type="button" id="gen-pass" class="text-btn">Suggest a strong passphrase</button>
+          </label>
+
+          <button id="create-btn" class="primary" type="submit">Seal Link</button>
+
+          <div id="advanced-summary" class="pill" hidden>
+            <span id="advanced-summary-text"></span>
+            <button type="button" id="advanced-clear" class="ghost small">Clear</button>
           </div>
-          <p class="hint">Add several and require <em>m-of-n</em> — e.g. password AND passkey — or give each
-            recipient their own password on one link.</p>
-          <div id="threshold-wrap" hidden>
-            <label for="threshold">Require
-              <input id="threshold" type="number" min="1" value="1" class="num">
-              of the methods to unlock (m-of-n)
-            </label>
-          </div>
-          <div class="passgen">
-            <button type="button" id="gen-pass" class="mini">🎲 generate passphrase</button>
-            <input id="gen-pass-out" type="text" readonly placeholder="8 random words ≈ 103 bits of entropy">
-            <button type="button" id="gen-pass-use" class="mini" hidden>use it</button>
-          </div>
-        </fieldset>
+          <p id="create-err" class="err" hidden></p>
+        </form>
 
-        <fieldset class="card">
-          <legend>Options</legend>
-          <div class="opt-grid">
-            <label>Time-lock (unlock delay)
-              <select id="timelock">
-                <option value="off">off</option>
-                <option value="30s">30 seconds</option>
-                <option value="2m">2 minutes</option>
-                <option value="15m">15 minutes</option>
-                <option value="2h">2 hours</option>
-                <option value="1d">1 day</option>
-              </select>
-            </label>
-            <label>Expires (advisory)
-              <input id="expiry" type="datetime-local">
-            </label>
-            <label>Public note (shown before unlock)
-              <input id="note" type="text" placeholder="e.g. Alice — the thing we discussed">
-            </label>
-            <label class="check"><input id="path-toggle" type="checkbox"> Path-style link (<code>/_u/…</code>, survives fragment-stripping; the server sees the ciphertext)</label>
+        <div id="create-result" hidden>
+          <h2>Your sealed link</h2>
+          <p class="sub">Share it however you like. Send the password separately — a different
+            message or app is strongest.</p>
+          <input id="link-out" type="text" readonly>
+          <div class="row-actions">
+            <button id="copy-btn" class="primary small-btn">Copy link</button>
+            <button id="share-btn" class="ghost" hidden>Share…</button>
+            <button id="new-link-btn" class="ghost">Seal another</button>
           </div>
-        </fieldset>
-
-        <fieldset class="card">
-          <legend>Sign as (optional — proves who sealed it)</legend>
-          <div class="opt-grid">
-            <label>Identity file <input id="identity-file" type="file" accept=".json,application/json"></label>
-            <label>Name <input id="identity-name" type="text" placeholder="your handle"></label>
-            <button type="button" id="gen-identity" class="mini">generate identity</button>
-          </div>
-          <p class="hint" id="identity-status"></p>
-        </fieldset>
-
-        <button id="create-btn" class="primary" type="submit">🕯️ Create sealed link</button>
-        <p id="create-err" class="err" hidden></p>
-      </form>
-
-      <section id="create-result" class="card result" hidden>
-        <div class="result-seal">
-          <div class="wax-seal" id="wax-seal" aria-hidden="true"><span>✦</span></div>
+          <button id="qr-toggle" class="text-btn" type="button">Show QR code</button>
+          <canvas id="qr-canvas" width="240" height="240" title="QR code of the link" hidden></canvas>
         </div>
-        <h2>Sealed!</h2>
-        <p class="hint">Share this link however you like. The password (if any) travels separately —
-          by a different channel is strongest.</p>
-        <input id="link-out" type="text" readonly>
-        <div class="result-actions">
-          <button id="copy-btn" class="mini">copy</button>
-          <button id="share-btn" class="mini" hidden>share…</button>
-          <button id="new-link-btn" class="mini">seal another</button>
-        </div>
-        <canvas id="qr-canvas" width="240" height="240" title="QR code of the link"></canvas>
-      </section>
+      </div>
+      <p class="footnote">Your link and password never reach our server. Ever. <a id="footer-prove" href="#">See for yourself</a>.</p>
     </section>
 
     <!-- ============ OPEN ============ -->
     <section id="view-open" class="view" hidden>
-      <h1>This link is sealed</h1>
-      <div class="card open-card">
-        <p class="open-meta"><strong id="open-host">…</strong>
-          <span id="open-signed"></span>
-          <span id="open-exp" class="warn"></span></p>
-        <p id="open-note" class="note" hidden></p>
-        <p id="open-sig-results" class="hint"></p>
-        <p id="open-thr" class="hint"></p>
+      <div class="hero" id="open-sealed">
+        <div class="seal-orb locked" id="seal-orb-open" aria-hidden="true"><span>✦</span></div>
+        <h1>This link is sealed.</h1>
+        <p class="sub open-meta"><strong id="open-host">…</strong><span id="open-signed"></span><span id="open-exp" class="warn"></span></p>
+        <p id="open-note" class="sub note" hidden></p>
+        <p id="open-sig-results" class="hint" hidden></p>
+        <p id="open-thr" class="hint" hidden></p>
 
         <form id="open-form">
-          <div id="open-pw-wrap" hidden>
-            <label for="open-pw">Password <input id="open-pw" type="password" autocomplete="current-password"></label>
-          </div>
-          <div id="open-keyfile-wrap" hidden>
-            <label for="open-keyfile">Key file (seal-key.json) <input id="open-keyfile" type="file" accept=".json,application/json"></label>
-          </div>
-          <button id="open-btn" class="primary" type="submit">🔓 Unlock</button>
-          <button id="open-passkey-btn" class="secondary" type="button" hidden>🔑 Unlock with passkey</button>
+          <label class="field" id="open-pw-wrap" hidden>
+            <span class="field-label">Password</span>
+            <input id="open-pw" type="password" placeholder="Password" autocomplete="current-password">
+          </label>
+          <label class="field" id="open-keyfile-wrap" hidden>
+            <span class="field-label">Key file</span>
+            <input id="open-keyfile" type="file" accept=".json,application/json">
+          </label>
+          <button id="open-btn" class="primary" type="submit">Unlock</button>
+          <button id="open-passkey-btn" class="primary secondary-tone" type="button" hidden>Unlock with Passkey</button>
         </form>
         <div id="timelock-box" hidden>
-          <p class="hint">This link has a time-lock. Grinding the unlock key… <span id="timelock-eta"></span></p>
+          <p class="hint">This link is time-locked. Unlocking takes <span id="timelock-eta"></span> on this device…</p>
           <div class="bar"><div id="timelock-bar"></div></div>
         </div>
         <p id="open-err" class="err" hidden></p>
       </div>
 
-      <section id="open-result" class="card result" hidden>
-        <div class="result-seal">
-          <div class="wax-seal broken" aria-hidden="true"><span>✦</span></div>
-        </div>
-        <h2 id="result-title">Unsealed</h2>
+      <div class="hero" id="open-result" hidden>
+        <div class="seal-orb broken" aria-hidden="true"><span>✦</span></div>
+        <h1>Unsealed.</h1>
         <div id="result-url-wrap" hidden>
-          <p class="hint">You are about to visit:</p>
-          <p id="result-url" class="dest"></p>
-          <p class="warn">Only continue if you trust whoever sent you this link. Sealing hides
-            the destination from the server — not from the sender.</p>
-          <button id="continue-btn" class="primary">Continue to <span id="continue-host"></span> →</button>
+          <p class="sub">You're about to open:</p>
+          <p class="dest" id="result-url"></p>
+          <p class="warn small">Check the address — whoever sent you this link could be pointing anywhere.</p>
+          <button id="continue-btn" class="primary">Open <span id="continue-host"></span> →</button>
         </div>
         <div id="result-text-wrap" hidden>
-          <textarea id="result-text" rows="6" readonly></textarea>
-          <button id="result-text-copy" class="mini">copy</button>
+          <p class="sub">The secret inside:</p>
+          <textarea id="result-text" rows="5" readonly></textarea>
+          <button id="result-text-copy" class="ghost">Copy</button>
         </div>
-        <p id="result-sig" class="hint"></p>
-      </section>
+      </div>
 
-      <section id="open-gone" class="card" hidden>
-        <h2>This link is gone</h2>
-        <p class="hint">It was burned after first read, expired, or never existed on this instance.</p>
-      </section>
+      <div class="hero" id="open-gone" hidden>
+        <h1>This link is gone.</h1>
+        <p class="sub">It was burned after first read, expired, or never existed here.</p>
+      </div>
     </section>
 
-    <!-- ============ PROVE ============ -->
-    <section id="view-prove" class="view" hidden>
-      <h1>Prove it: the server sees nothing</h1>
-      <p class="lede">Press the button and this page asks the server to confess <em>exactly</em>
-        what your last request contained. The encrypted part of a link lives after the
-        <code>#</code> — and browsers never send fragments to servers.</p>
-      <button id="prove-btn" class="primary">Run the check</button>
-      <pre id="prove-out" class="card"></pre>
-      <p class="hint">What this means: the link's ciphertext, your password, and the destination
-        never reach this server (or Cloudflare's edge). The worst an attacker with server access
-        gets is “someone opened the page.”</p>
+    <!-- ============ ADVANCED ============ -->
+    <section id="view-advanced" class="view" hidden>
+      <h1>Advanced</h1>
+      <p class="sub">The defaults are right for most people. Anything you turn on here applies to
+        the next link you seal — it stays off otherwise.</p>
+
+      <div class="panel">
+        <h2>Unlock methods</h2>
+
+        <label class="switch-row">
+          <span class="switch-copy"><strong>Passkey</strong><small>Open with Touch&nbsp;ID or Windows&nbsp;Hello. The key lives on the recipient's device.</small></span>
+          <input type="checkbox" id="adv-prf"><span class="switch"></span>
+        </label>
+
+        <label class="switch-row">
+          <span class="switch-copy"><strong>Recipient key</strong><small>Open with a key file instead of a password. Recipient needs a seal-key.json.</small></span>
+          <input type="checkbox" id="adv-pub"><span class="switch"></span>
+        </label>
+        <div class="indent" id="adv-pub-row" hidden>
+          <label class="field"><span class="field-label">Recipient's public key file</span>
+            <input id="adv-pub-file" type="file" accept=".json,application/json"></label>
+          <button type="button" id="gen-keypair" class="text-btn">Generate a key pair for someone</button>
+        </div>
+
+        <label class="switch-row">
+          <span class="switch-copy"><strong>Second password</strong><small>A different password for a second person, on the same link.</small></span>
+          <input type="checkbox" id="adv-pw2"><span class="switch"></span>
+        </label>
+        <div class="indent" id="adv-pw2-row" hidden>
+          <label class="field"><span class="field-label">Second password</span>
+            <input id="adv-pw2-value" type="password" placeholder="Their password" autocomplete="new-password"></label>
+        </div>
+
+        <label class="switch-row">
+          <span class="switch-copy"><strong>Require every method</strong><small>2-of-2 (or more): password AND passkey, etc.</small></span>
+          <input type="checkbox" id="adv-thr"><span class="switch"></span>
+        </label>
+
+        <label class="switch-row">
+          <span class="switch-copy"><strong>Auto-open link</strong><small>Password travels inside the link — anyone with the link can open it. Convenience, not secrecy.</small></span>
+          <input type="checkbox" id="adv-embed"><span class="switch"></span>
+        </label>
+      </div>
+
+      <div class="panel">
+        <h2>Time &amp; expiry</h2>
+        <label class="field">
+          <span class="field-label">Time-lock — a delay before it can open</span>
+          <select id="adv-timelock">
+            <option value="off">Off</option>
+            <option value="30s">30 seconds</option>
+            <option value="2m">2 minutes</option>
+            <option value="15m">15 minutes</option>
+            <option value="2h">2 hours</option>
+            <option value="1d">1 day</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label">Expires</span>
+          <input id="adv-expiry" type="datetime-local">
+          <small class="hint">Advisory — the link checks it, but a technical user could bypass it.</small>
+        </label>
+      </div>
+
+      <div class="panel">
+        <h2>Identity &amp; note</h2>
+        <label class="field">
+          <span class="field-label">Public note — shown before unlocking</span>
+          <input id="adv-note" type="text" placeholder="e.g. For Alice — the thing we discussed">
+        </label>
+        <div class="switch-row">
+          <span class="switch-copy"><strong>Sign the link as you</strong><small>Recipients see "sealed by you ✓" with Ed25519 + ML-DSA-65 signatures.</small></span>
+          <input type="checkbox" id="adv-sign"><span class="switch"></span>
+        </div>
+        <div class="indent" id="adv-sign-row" hidden>
+          <label class="field"><span class="field-label">Name</span>
+            <input id="adv-identity-name" type="text" placeholder="Your handle"></label>
+          <label class="field"><span class="field-label">Identity file (or generate one)</span>
+            <input id="adv-identity-file" type="file" accept=".json,application/json"></label>
+          <button type="button" id="gen-identity" class="text-btn">Generate identity</button>
+          <p class="hint" id="identity-status"></p>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Link style</h2>
+        <label class="switch-row">
+          <span class="switch-copy"><strong>Path-style link</strong><small>Survives apps that strip <code>#fragments</code>. The server then sees the ciphertext (still can't read it).</small></span>
+          <input type="checkbox" id="adv-path"><span class="switch"></span>
+        </label>
+      </div>
     </section>
 
-    <!-- ============ FAQ ============ -->
-    <section id="view-faq" class="view" hidden>
+    <!-- ============ SECURITY ============ -->
+    <section id="view-about" class="view" hidden>
       <h1>Security, honestly</h1>
-      <div class="card faq">
-        <h2>What does the server store?</h2>
-        <p>Nothing. There is no database, no KV, no logs of link data. The entire link — salt, IV,
-          ciphertext, unlock wrappers — travels inside the URL fragment. This page is a static file.</p>
-        <h2>Can someone without the password read the destination?</h2>
-        <p>No. The destination is AES-256-GCM encrypted. Without the password, passkey, or key file,
-          it is indistinguishable from random bytes. With a quantum computer? Still no — AES-256 holds
-          up; the real risk is <em>weak passwords</em>, which is why Argon2id and the passphrase
-          generator exist.</p>
-        <h2>Is my password sent to the server?</h2>
-        <p>Never. Decryption happens in your browser. The password never leaves your device.</p>
-        <h2>Then why the <em>path-style</em> option?</h2>
-        <p>Fragments can be dropped by some chat apps or corporate filters. Path-style links put the
-          ciphertext in the path, so the server <em>does</em> see it — but still cannot decrypt it.
-          The password still never travels.</p>
-        <h2>Where do links leak?</h2>
-        <p>Browser history and cloud sync services store full URLs including fragments. If you use
-          embedded-password links, the link <em>is</em> the credential — treat it like a password.
-          Share strong links only over channels you trust.</p>
-        <h2>What if the password is wrong?</h2>
-        <p>The GCM authentication tag fails and decryption refuses — there is no way to tell a
-          “close” password from a wrong one, and no server to rate-limit guesses, so use long
-          passphrases.</p>
-        <h2>Is the time-lock real?</h2>
-        <p>It is a genuine sequential hash grind (can't be parallelized), but a determined opener
-          can patch this page's JavaScript to skip the wait. It's a fair-use lock, not tamper-proof.</p>
-        <h2>Can a link be revoked?</h2>
-        <p>Stateless links can't be killed — only passwords can stop being shared. The optional
-          <em>premium</em> mode stores only ciphertext server-side and adds burn-after-read, expiry
-          enforcement, and fetch counters. See <code>docs/PREMIUM.md</code>.</p>
-        <h2>What's “quantum secure” here?</h2>
-        <p>Encryption: AES-256 (NIST post-quantum adequate). Keypairs: hybrid X25519 + ML-KEM-768 —
-          needs both a classical <em>and</em> a quantum break. Signatures: Ed25519 + ML-DSA-65.
-          Passwords: Argon2id memory-hardness. The weak link is always the human one.</p>
+      <div class="panel">
+        <p class="sub">Press the button and this page asks the server to confess <em>exactly</em>
+          what it saw from you. The encrypted part of a link lives after the <code>#</code> —
+          and browsers never send fragments to servers.</p>
+        <button id="prove-btn" class="primary">Run the check</button>
+        <pre id="prove-out" hidden></pre>
+      </div>
+      <div class="panel faq">
+        <h2>Where is my data stored?</h2>
+        <p>Nowhere. The link carries its own encrypted destination. There is no database to hack,
+          subpoena, or sell.</p>
+        <h2>Can someone without the password read it?</h2>
+        <p>No. AES-256 encryption, post-quantum resistant. The weak point is always a weak
+          password — which is why there's a suggested-passphrase button.</p>
+        <h2>Does the server ever see my password?</h2>
+        <p>Never. Unlocking happens entirely in your browser.</p>
+        <h2>Where can links leak?</h2>
+        <p>Browser history and cloud sync store full URLs. Treat auto-open links like passwords.</p>
+        <h2>Can a link be taken back?</h2>
+        <p>A stateless link can't be revoked — only its password can stop being shared. That's
+          the trade for storing nothing.</p>
+        <p class="hint"><a id="footer-repo" href="#" target="_blank" rel="noopener">Source code</a> ·
+          <a id="footer-spec" href="#" target="_blank" rel="noopener">Envelope spec</a> ·
+          <a id="footer-security" href="#" target="_blank" rel="noopener">SECURITY.md</a></p>
       </div>
     </section>
   </main>
 
   <footer>
-    <p>Magic Router · <a id="footer-repo" href="#" target="_blank" rel="noopener">source</a> ·
-      <a id="footer-spec" href="#" target="_blank" rel="noopener">envelope spec</a> ·
-      <a id="footer-security" href="#" target="_blank" rel="noopener">SECURITY.md</a></p>
-    <p class="hint">Encryption and sealing happen entirely in your browser. This server stores nothing.</p>
+    <p>Encryption happens in your browser. This server stores nothing.</p>
   </footer>
 
   <script type="module" src="/app.js"></script>
