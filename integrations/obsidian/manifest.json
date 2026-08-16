@@ -1,0 +1,9 @@
+{
+  "id": "seal-link",
+  "name": "Seal Link",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "Seal URLs and secrets as stateless encrypted Magic Router links, right inside Obsidian.",
+  "author": "Edvin Kjäll",
+  "isDesktopOnly": false
+}

@@ -1,0 +1,33 @@
+{
+  "name": "seal-link",
+  "title": "Seal Link",
+  "description": "Seal any URL with Magic Router — encrypted, stateless links",
+  "icon": "icon.png",
+  "author": "Edvin Kjäll",
+  "license": "MIT",
+  "commands": [
+    {
+      "name": "seal",
+      "title": "Seal Link",
+      "subtitle": "Magic Router",
+      "description": "Open the sealer with a URL prefilled (argument, selection, or clipboard)",
+      "mode": "no-view",
+      "arguments": [
+        {
+          "name": "url",
+          "placeholder": "https://example.com",
+          "type": "text",
+          "required": false
+        }
+      ]
+    }
+  ],
+  "dependencies": {
+    "@raycast/api": "^1.64.0",
+    "open": "^10.0.0"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "^1.0.8",
+    "@types/node": "^20.8.10"
+  }
+}

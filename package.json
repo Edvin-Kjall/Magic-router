@@ -1,0 +1,33 @@
+{
+  "name": "magic-router",
+  "version": "0.1.0",
+  "description": "Stateless encrypted links: a Cloudflare Worker that stores nothing. Links carry their own AES-256-GCM encrypted destination, unlocked by password (Argon2id), passkey (WebAuthn PRF), or keypair (hybrid X25519 + ML-KEM) — with Shamir thresholds, time-locks, signed seals and secret-text payloads.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "seal": "cli/seal.mjs"
+  },
+  "files": [
+    "cli",
+    "site/public/lib",
+    "site/public/vendor"
+  ],
+  "scripts": {
+    "vendor": "node scripts/build-vendor.mjs",
+    "test": "node --test tests/",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@noble/post-quantum": "0.7.0",
+    "hash-wasm": "4.12.0",
+    "qrcode": "1.5.4"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "wrangler": "4.123.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

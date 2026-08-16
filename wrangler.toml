@@ -1,0 +1,23 @@
+name = "magic-router"
+main = "site/worker.js"
+compatibility_date = "2026-08-16"
+
+[assets]
+directory = "site/public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = [ "/api/*" ]
+
+[vars]
+PREMIUM = "false"
+# PUBLIC_HOST = "https://your-domain.example"   # for Slack links + premium URLs
+
+# --- Optional premium mode (stateful, ciphertext only) ---
+# See docs/PREMIUM.md. Create the namespace, paste its id, uncomment:
+# npx wrangler kv namespace create SEAL_KV
+# [[kv_namespaces]]
+# binding = "SEAL_KV"
+# id = ""
+
+# --- Optional Slack slash command ---
+# npx wrangler secret put SLACK_SIGNING_SECRET
