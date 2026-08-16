@@ -43,6 +43,11 @@ that does and does not buy you.
 
 ## What the server does and does not see
 
+- **Destination:** always fully encrypted (AES-256-GCM) — path, query, fragment and
+  secret-text payloads are never readable without a credential. The *domain* is stored
+  in public metadata only when the sealer turns on **Destination preview** (an Advanced
+  opt-in, off by default). With preview on, anyone holding the link learns the domain
+  (not the path) before unlocking.
 - Fragment links (`/#s3.…`): the server sees **nothing** — browsers never transmit
   fragments. This is the default.
 - Path links (`/_u/s3.…`): the server sees the **ciphertext envelope** (public-safe:

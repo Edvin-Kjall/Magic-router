@@ -28,7 +28,9 @@ you                      the link                          the server
 - **Time-locks** — sequential SHA-256 grind before the payload opens (fair-use; see SECURITY).
 - **Signed seals** — Ed25519 + ML-DSA-65 hybrid signatures; "Sealed by Alice ✅".
 - **Secret text**, not just URLs — tokens, API keys, messages.
-- **Destination preview + confirm screen** — anti-phishing by design.
+- **Confirm screen + urlscan.io malware check** — anti-phishing by design, with an
+  optional destination preview (Advanced toggle, off by default — the destination
+  stays fully encrypted).
 - **Legacy support** — pre-v3 links still open.
 - **CLI** (`seal`) for terminals and scripts, plus **bookmarklet, Raycast, iOS Shortcut,
   Slack slash command, Obsidian plugin** — all prefilling wrappers around the same page.

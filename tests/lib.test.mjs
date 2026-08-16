@@ -53,8 +53,18 @@ test('password seal → open roundtrip', async () => {
   const r = await open(str, { password: 'correct horse' });
   assert.equal(r.type, 'url');
   assert.equal(r.data, URL);
-  assert.equal(r.meta.host, 'example.com');
+  // destination stays fully encrypted by default — no host in public metadata
+  assert.equal(r.meta.host, undefined);
   await assert.rejects(open(str, { password: 'wrong' }));
+});
+
+test('destination preview is opt-in (preview: true stores only the domain)', async () => {
+  const env = await seal({ type: 'url', data: URL, passwords: ['pw'], kdf: KDF, preview: true });
+  const r = await open(await encodeEnvelope(env), { password: 'pw' });
+  assert.equal(r.meta.host, 'example.com');
+  // full path is NOT in the public metadata
+  const parsed = await decodeEnvelope(await encodeEnvelope(env));
+  assert.ok(!JSON.stringify(parsed.meta).includes('very/secret'));
 });
 
 test('tampering with ciphertext is detected', async () => {

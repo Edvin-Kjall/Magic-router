@@ -110,6 +110,7 @@ function activeAdvanced() {
   if ($('adv-sign').checked) out.push('Signed' + ($('adv-sign-pq').checked ? ' (PQ)' : ''));
   if ($('adv-note').value.trim()) out.push('Note');
   if ($('adv-path').checked) out.push('Path-style');
+  if ($('adv-preview').checked) out.push('Preview');
   return out;
 }
 
@@ -125,7 +126,7 @@ function updateAdvancedSummary() {
 }
 
 function clearAdvanced() {
-  for (const id of ['adv-prf', 'adv-pub', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-sign-pq', 'adv-path']) {
+  for (const id of ['adv-prf', 'adv-pub', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-sign-pq', 'adv-path', 'adv-preview']) {
     $(id).checked = false;
   }
   $('adv-timelock').value = 'off';
@@ -210,6 +211,7 @@ async function onCreate(e) {
     if (tl !== 'off') {
       opts.timeLock = await makeTimeLock(parseDuration(tl), hashRate || 1e6);
     }
+    if ($('adv-preview').checked) opts.preview = true;
     if ($('adv-expiry').value) opts.expiry = $('adv-expiry').value;
     if ($('adv-note').value.trim()) opts.note = $('adv-note').value.trim();
     if ($('adv-sign').checked) {
@@ -559,7 +561,7 @@ function bindStatic() {
   });
 
   // advanced
-  for (const id of ['adv-prf', 'adv-pub', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-sign-pq', 'adv-path']) {
+  for (const id of ['adv-prf', 'adv-pub', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-sign-pq', 'adv-path', 'adv-preview']) {
     $(id).addEventListener('change', () => {
       refreshAdvancedRows();
       updateAdvancedSummary();

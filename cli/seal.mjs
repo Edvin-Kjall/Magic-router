@@ -46,7 +46,7 @@ Usage:
   seal create  --url <destination> | --text <secret>
                [--password <pw>]... [--embed <pw>] [--recipient <seal-key.json>]
                [--threshold <m>] [--delay <30s|5m|2h|1d>] [--expires <ISO-date>]
-               [--note <text>] [--sign <seal-identity.json>] [--pq]
+               [--note <text>] [--sign <seal-identity.json>] [--pq] [--preview]
                [--host <origin>] [--path] [--qr] [--json]
 
   seal open    <link> [--password <pw>]... [--key <seal-key.json>] [--json]
@@ -71,7 +71,7 @@ function fail(msg) {
 
 // argv scanner: --flag value, --flag=value, --boolflag, repeatable flags
 function parseArgs(argv) {
-  const bools = new Set(['json', 'qr', 'path', 'help', 'burn', 'pq']);
+  const bools = new Set(['json', 'qr', 'path', 'help', 'burn', 'pq', 'preview']);
   const out = { _: [], f: {} };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -143,6 +143,7 @@ async function cmdCreate(args) {
   if (f.note) opts.note = String(f.note);
   if (f.sign) opts.signer = JSON.parse(readFileSync(f.sign, 'utf8'));
   if (f.pq) opts.pq = true;
+  if (f.preview) opts.preview = true;
 
   const env = await seal(opts);
   const frag = await encodeEnvelope(env);

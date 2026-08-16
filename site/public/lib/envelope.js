@@ -415,7 +415,10 @@ export async function verifySignatures(env) {
 // All unlock methods in one call. passwords: string[], embedded: string|null,
 // recipient: keypair JSON (public part used), prf: bool (browser enrollment),
 // threshold: m for m-of-n over the methods, timeLock: {saltB64, n},
-// expiry: Date|ISO string (advisory), note: public note, signer: identity.
+// expiry: Date|ISO string (advisory), note: public note, signer: identity,
+// pq: add ML-DSA-65 signature, preview: store the destination domain in
+// public metadata (anti-phishing preview — off by default: the destination
+// stays fully encrypted).
 export async function seal(opts = {}) {
   const {
     type = 'url',
@@ -431,6 +434,7 @@ export async function seal(opts = {}) {
     kdf = KDF_DEFAULT,
     signer = null,
     pq = false,
+    preview = false,
   } = opts;
 
   if (!data) throw new SealError('seal: data is required');
@@ -448,7 +452,7 @@ export async function seal(opts = {}) {
 
   const K = randomBytes(32);
   const meta = {};
-  if (type === 'url') {
+  if (preview && type === 'url') {
     try {
       meta.host = new URL(String(data)).hostname;
     } catch {

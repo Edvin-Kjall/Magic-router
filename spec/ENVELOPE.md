@@ -19,7 +19,9 @@ The envelope JSON:
   "v": 3,                    // envelope version
   "t": "url" | "text",       // payload type
   "meta": {                  // all public, shown before unlock
-    "host": "example.com",   // optional destination preview
+    "host": "example.com",   // optional destination preview — ONLY when the
+                             // sealer opts in; off by default so the
+                             // destination stays fully encrypted
     "exp": "2026-12-31T00:00:00.000Z",  // advisory expiry (client-checked)
     "note": "…",             // optional public note
     "time": { "salt": "…", "n": 1000000 },  // time-lock: n sequential SHA-256 rounds
