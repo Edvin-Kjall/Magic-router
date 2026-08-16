@@ -80,7 +80,9 @@
           <canvas id="qr-canvas" width="240" height="240" title="QR code of the link" hidden></canvas>
         </div>
       </div>
-      <p class="footnote">Your link and password never reach our server. Ever. <a id="footer-prove" href="#">See for yourself</a>.</p>
+      <p class="footnote">Your link and password never reach our server. Ever. <a id="footer-prove" href="#">See for yourself</a>.<br>
+        Sharing a file instead? <a href="https://send.tresorit.com/" target="_blank" rel="noopener noreferrer">Tresorit Send</a>
+        gives files the same unreadable-link treatment.</p>
     </section>
 
     <!-- ============ OPEN ============ -->
@@ -89,7 +91,7 @@
         <div class="seal-orb locked" id="seal-orb-open" aria-hidden="true"><span>✦</span></div>
         <h1>This link is sealed.</h1>
         <p class="sub open-meta"><strong id="open-host">…</strong><span id="open-signed"></span><span id="open-exp" class="warn"></span></p>
-        <p id="open-scan-line" class="hint" hidden><a id="open-scan-link" href="#" target="_blank" rel="noopener noreferrer">Check this domain on urlscan.io ↗</a></p>
+        <p id="open-scan-line" class="hint" hidden><a id="open-scan-link" href="#" target="_blank" rel="noopener noreferrer">Check this domain on Google Safe Browsing ↗</a></p>
         <p id="open-note" class="sub note" hidden></p>
         <p id="open-sig-results" class="hint" hidden></p>
         <p id="open-thr" class="hint" hidden></p>
@@ -121,11 +123,7 @@
           <p class="dest" id="result-url"></p>
           <p class="warn small">Check the address — whoever sent you this link could be pointing anywhere.</p>
           <button id="continue-btn" class="primary">Open <span id="continue-host"></span> →</button>
-          <button id="scan-btn" class="ghost" type="button">🛡️ Not sure? Check this domain on urlscan.io</button>
-          <p class="hint" id="scan-more">Other checks:
-            <a id="vt-link" href="#" target="_blank" rel="noopener noreferrer">VirusTotal</a> ·
-            <a id="gsb-link" href="#" target="_blank" rel="noopener noreferrer">Google Safe Browsing</a>
-          </p>
+          <button id="scan-btn" class="text-btn" type="button">🛡️ Check with Google Safe Browsing</button>
         </div>
         <div id="result-text-wrap" hidden>
           <p class="sub">The secret inside:</p>
@@ -250,6 +248,21 @@
           and browsers never send fragments to servers.</p>
         <button id="prove-btn" class="primary">Run the check</button>
         <pre id="prove-out" hidden></pre>
+      </div>
+      <div class="panel">
+        <h2>Sharing files?</h2>
+        <p>Magic Router seals links and text. For files, use
+          <a href="https://send.tresorit.com/" target="_blank" rel="noopener noreferrer">Tresorit Send</a> —
+          the same philosophy: the file is end-to-end encrypted, and the link reveals nothing about it.</p>
+        <ol class="howto">
+          <li>Open <a href="https://send.tresorit.com/" target="_blank" rel="noopener noreferrer">send.tresorit.com</a> — no account needed.</li>
+          <li>Drop in your file (or files).</li>
+          <li>Optionally set a password, an expiry date, or a download limit.</li>
+          <li>You get an opaque link like <code>https://send.tresorit.com/a#JHTd1HozVommR83n43VJLg</code> —
+            it does not show the file name, size, or contents.</li>
+          <li>Share the link. Send the password (if you set one) separately — same rule as here.</li>
+        </ol>
+        <p class="hint">Encryption happens in your browser before anything is uploaded; Tresorit never sees the file contents.</p>
       </div>
       <div class="panel faq">
         <h2>Where is my data stored?</h2>

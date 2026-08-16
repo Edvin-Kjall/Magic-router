@@ -344,7 +344,8 @@ async function beginOpen(envStr, tail, hostedMeta) {
   const scanLine = $('open-scan-line');
   if (d.host) {
     scanLine.hidden = false;
-    $('open-scan-link').href = `https://urlscan.io/domain/${encodeURIComponent(d.host)}`;
+    $('open-scan-link').href =
+      'https://transparencyreport.google.com/safe-browsing/search?url=' + encodeURIComponent(d.host);
   } else {
     scanLine.hidden = true;
   }
@@ -463,21 +464,15 @@ function showResult(r, env) {
     }
     $('continue-host').textContent = host;
     $('continue-btn').onclick = () => location.replace(r.data);
-    // Third-party checks — all free, no account required.
-    // urlscan.io and VirusTotal search by domain (their parsers reject full
-    // URLs); Google Safe Browsing takes the exact URL.
-    let scanHost = host;
-    try {
-      scanHost = new URL(r.data).hostname;
-    } catch {
-      /* raw string */
-    }
+    // Google Safe Browsing — official Google verdict for the exact URL,
+    // free, no account. Opens in a new tab with no referrer.
     $('scan-btn').onclick = () => {
-      window.open('https://urlscan.io/search/#' + encodeURIComponent(scanHost), '_blank', 'noopener,noreferrer');
+      window.open(
+        'https://transparencyreport.google.com/safe-browsing/search?url=' + encodeURIComponent(r.data),
+        '_blank',
+        'noopener,noreferrer'
+      );
     };
-    $('vt-link').href = 'https://www.virustotal.com/gui/search/' + encodeURIComponent(scanHost);
-    $('gsb-link').href =
-      'https://transparencyreport.google.com/safe-browsing/search?url=' + encodeURIComponent(r.data);
   } else {
     $('result-url-wrap').hidden = true;
     $('result-text-wrap').hidden = false;
