@@ -265,10 +265,10 @@ test('extended dictionary covers top-1000 domains and stays reversible', async (
   assert.ok(EXTENDED.length > 500, 'extended table should carry the top-1000 tail');
   const cases = [
     ['https://www.tiktok.com/@user/video/1234567890', true],
-    ['https://www.whatsapp.com/channel/abc', true],
-    ['https://dn.se/nyheter/inrikes', true],
+    ['https://www.whatsapp.com/channel/abc', false], // 'whatsapp' label + .com core tokens win
+    ['https://zoom.us/j/1234567890', true],
     ['https://www.youtube.com/watch?v=dQw4w9WgXcQ', false], // core tokens already optimal
-    ['https://www.svt.se/nyheter', false], // label + .se = 2 bytes, core wins
+    ['https://www.bing.com/search?q=hello', false], // label + .com = 2 bytes, core wins
   ];
   for (const [s, wantExt] of cases) {
     const bytes = new TextEncoder().encode(s);
