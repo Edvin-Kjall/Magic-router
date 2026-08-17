@@ -1,4 +1,4 @@
-# Magic Router Envelope — format specification, v3/v4/v5
+# Magic Router Envelope — format specification, v3–v6
 
 A sealed link is a URL fragment (or path segment) of the form:
 
@@ -6,6 +6,7 @@ A sealed link is a URL fragment (or path segment) of the form:
 s3.<base64url( FLAG || maybe-deflate( JSON ) )>[.<embedded-password>]   ← v3 (verbose, IV-carrying)
 s4.<base64url( FLAG || maybe-deflate( JSON ) )>[.<embedded-password>]   ← v4 (compact keys, IV-carrying)
 s5.<base64url( FLAG || maybe-deflate( JSON ) )>[.<embedded-password>]   ← v5 (compact keys, IV-less, direct mode)
+s6.<base64url( binary )>[.<embedded-password>]                         ← v6 (pure binary, no JSON, no compression)
 ```
 
 - `FLAG` is one byte: `0x01` = the JSON is deflate-raw compressed, `0x00` = raw UTF-8.
@@ -13,7 +14,37 @@ s5.<base64url( FLAG || maybe-deflate( JSON ) )>[.<embedded-password>]   ← v5 (
 - The optional `.`-terminated tail after the envelope is the **embedded password**
   (percent-encoded in the full URL). Its presence selects auto-open mode; the envelope
   contains a matching `embed` wrapper.
-- Decoders MUST accept `s3.`, `s4.` and `s5.`. New links SHOULD be encoded as `s5.`.
+- Decoders MUST accept `s3.` through `s6.`. New links SHOULD be encoded as `s6.`.
+
+## v6: pure binary
+
+No JSON, no key names, no deflate (ciphertext is incompressible anyway).
+All integers big-endian. Layout:
+
+```
+u8  version (6)
+u8  flags            bit0 type (0=url 1=text) · bit1 hasMeta · bit2 hasThr
+[ meta section if hasMeta:
+    u8  flags        bit0 host · bit1 exp · bit2 note · bit3 time · bit4 sig
+    host: u8 len + utf8
+    exp:  u48 unix ms
+    note: u16 len + utf8
+    time: u48 n + 16-byte salt
+    sig:  u8 count, then per sig: u8 alg (1=ed25519 2=mldsa65),
+          u8 nameLen + utf8, u16 pkLen + pk, u16 sigLen + sig ]
+[ u8 n, u8 m if hasThr ]
+u8  wrapCount, then per wrapper:
+    u8  kind           bits0-1: 0 pass · 1 embed · 2 prf · 3 pub · bit7: direct
+    pass/embed: u8 kdf (0=argon2id 64MiB/3/1, 1=argon2id 8MiB/1/1, 2=pbkdf2+u32 i)
+                + 16-byte salt + [48-byte ct unless direct]
+    prf: 32-byte salt + u8 cidLen + cid + [32-byte ct unless direct]
+    pub: 32-byte eph X25519 pk + 1088-byte ML-KEM-768 ct + [48-byte ct unless direct]
+    [ u8 xi if hasThr ]
+u16 payloadLen + payload ciphertext
+```
+
+`ct` fields are ciphertext||tag with the implicit zero IV (see v5 notes).
+A typical one-password link is ~60 bytes ≈ 80 base64url characters.
 
 ## v5 changes: IV-less GCM and direct mode
 

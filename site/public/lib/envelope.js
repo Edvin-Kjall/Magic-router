@@ -136,17 +136,21 @@ export function isPlainLink(s) {
 
 export async function encodePlainUrl(url) {
   let s = String(url);
-  let scheme = 0; // 0 none, 1 http://, 2 https:// (bits 1-2 of the flag byte)
+  let flags = 0; // bit0 compressed · bits1-2 scheme (0 none, 1 http, 2 https) · bit3 www. stripped
   if (/^https:\/\//i.test(s)) {
-    scheme = 2;
+    flags |= 2 << 1;
     s = s.slice(8);
   } else if (/^http:\/\//i.test(s)) {
-    scheme = 1;
+    flags |= 1 << 1;
     s = s.slice(7);
   }
+  if (/^www\./i.test(s)) {
+    flags |= 1 << 3;
+    s = s.slice(4);
+  }
   const { flag, bytes } = await deflateMaybe(toBytes(s));
-  const flags = flag | (scheme << 1);
-  return PLAIN_PREFIX + bytesToB64u(concatBytes(new Uint8Array([flags]), bytes));
+  const outFlags = flags | flag;
+  return PLAIN_PREFIX + bytesToB64u(concatBytes(new Uint8Array([outFlags]), bytes));
 }
 
 export async function decodePlainUrl(str) {
@@ -156,6 +160,7 @@ export async function decodePlainUrl(str) {
   const scheme = (flags >> 1) & 3;
   const bytes = await inflateMaybe(flags & 1, raw.subarray(1));
   let s = toStr(bytes);
+  if (flags & 8) s = 'www.' + s;
   if (scheme === 2) s = 'https://' + s;
   else if (scheme === 1) s = 'http://' + s;
   return s;
