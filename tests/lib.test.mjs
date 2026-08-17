@@ -260,31 +260,54 @@ test('dictionary compression round-trips and helps typical URLs', async () => {
 });
 
 test('extended dictionary covers top-1000 domains and stays reversible', async () => {
-  const { dictCompressEx, dictDecompress, dictCompress, dictDecompressLegacy, EXTENDED } =
+  const { dictCompressEx, dictDecompress, dictDecompressV3, dictCompress, dictDecompressLegacy, EXTENDED } =
     await import('../site/public/lib/dict.js');
   assert.ok(EXTENDED.length > 500, 'extended table should carry the top-1000 tail');
+  const dec = (tier, bytes) =>
+    tier === 'v3' ? dictDecompressV3(bytes) : tier === 'v2' ? dictDecompress(bytes) : dictDecompressLegacy(bytes);
   const cases = [
-    ['https://www.tiktok.com/@user/video/1234567890', true],
-    ['https://www.whatsapp.com/channel/abc', false], // 'whatsapp' label + .com core tokens win
-    ['https://zoom.us/j/1234567890', true],
-    ['https://www.youtube.com/watch?v=dQw4w9WgXcQ', false], // core tokens already optimal
-    ['https://www.bing.com/search?q=hello', false], // label + .com = 2 bytes, core wins
+    // [url, expected tier]
+    ['https://www.tiktok.com/@user/video/1234567890', 'v3'], // ext token + digit run
+    ['https://www.whatsapp.com/channel/abc', 'v3'], // label wins; 'channel' is a run
+    ['https://zoom.us/j', 'v2'], // ext token, literals too short for a run
+    ['https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'v3'], // video id is a run
+    ['https://example.com/api/v1/users?id=42&page=2', 'legacy'], // core tokens only
   ];
-  for (const [s, wantExt] of cases) {
+  for (const [s, wantTier] of cases) {
     const bytes = new TextEncoder().encode(s);
-    const { bytes: c, extended } = dictCompressEx(bytes);
-    assert.deepEqual(dictDecompress(c), bytes, `${s} round-trip`);
-    assert.equal(extended, wantExt, `${s} extended flag`);
-    if (extended) assert.ok(c.some((b) => b >= 0x80), `${s} must misdecode loudly on old pages`);
+    const { bytes: c, tier } = dictCompressEx(bytes);
+    assert.deepEqual(dec(tier, c), bytes, `${s} round-trip`);
+    assert.equal(tier, wantTier, `${s} tier (${tier} != ${wantTier})`);
+    if (tier === 'v2') assert.ok(c.some((b) => b >= 0x80), `${s} must misdecode loudly on old pages`);
   }
-  // non-ASCII URLs: v2 escaping, still exact
+  // non-ASCII URLs: v2/v3 escaping, still exact
   const uni = new TextEncoder().encode('https://a.b/caf\u00e9\u2603?q=1');
-  const { bytes: cu, extended: eu } = dictCompressEx(uni);
-  assert.ok(eu, 'high-byte literals need the v2 decoder');
-  assert.deepEqual(dictDecompress(cu), uni);
+  const { bytes: cu, tier: tu } = dictCompressEx(uni);
+  assert.notEqual(tu, 'legacy', 'high-byte literals need a v2+ decoder');
+  assert.deepEqual(dec(tu, cu), uni);
   // legacy pair still round-trips legacy streams with high bytes
   const leg = dictCompress(new TextEncoder().encode('https://x.y/s\u00e9'));
   assert.deepEqual(dictDecompressLegacy(leg), new TextEncoder().encode('https://x.y/s\u00e9'));
+});
+
+test('locale and word tokens shrink the cloudflare registrar link', async () => {
+  const { dictCompressEx, dictDecompress, EXTENDED } = await import('../site/public/lib/dict.js');
+  const url = 'https://www.cloudflare.com/sv-se/products/registrar/';
+  const bytes = new TextEncoder().encode(url.slice('https://www.'.length)); // body after scheme/www
+  const { bytes: c, tier } = dictCompressEx(bytes);
+  assert.equal(tier, 'v2', 'locale + registrar are extended tokens, no runs needed');
+  assert.deepEqual(dictDecompress(c), bytes);
+  assert.ok(EXTENDED.includes('/sv-se'), 'locale prefix token present');
+  assert.ok(EXTENDED.includes('registrar'), 'registrar word token present');
+  assert.ok(c.length <= 12, `cloudflare body should be tiny, got ${c.length} bytes`);
+  // end-to-end: plain link is far shorter than the original URL
+  const { encodePlainUrl, decodePlainUrl } = await import('../site/public/lib/envelope.js');
+  const link = await encodePlainUrl(url);
+  assert.ok(link.length < url.length / 2, `plain link should be < half the URL, got ${link.length} vs ${url.length}`);
+  assert.equal(await decodePlainUrl(link), url);
+  // the previously-generated link still decodes (legacy tier, bit4 only)
+  const oldLink = 'u1.HNADFv9z_3Ya_3P_ZUkW_3L_Zf9n_2n_c_90_3L_Yf9yFg';
+  assert.equal(await decodePlainUrl(oldLink), url);
 });
 
 test('sealed links with extended-dictionary URLs round-trip', async () => {

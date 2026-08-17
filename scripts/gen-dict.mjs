@@ -125,10 +125,36 @@ function coreCost(s) {
   return cost;
 }
 
-// ---- extended table: full domains that beat core tokenization ----
+// ---- worldwide locale prefixes and common path words (extended table) ----
+// Generic tokens for international site structures: locale paths appear on
+// every global site, product/pricing/support words on every marketing site.
+const GLOBAL_WORDS = [
+  // locale prefixes
+  '/sv-se', '/sv', '/en', '/en-us', '/en-gb', '/en-au', '/en-ca', '/en-in',
+  '/de', '/de-de', '/fr', '/fr-fr', '/fr-ca', '/es', '/es-es', '/es-mx',
+  '/it', '/it-it', '/pt', '/pt-br', '/nl', '/nl-nl', '/pl', '/pl-pl',
+  '/ru', '/ru-ru', '/ja', '/ja-jp', '/zh', '/zh-cn', '/zh-tw', '/ko',
+  '/ko-kr', '/ar', '/tr', '/tr-tr', '/id', '/vi', '/th', '/hi', '/cs',
+  '/ro', '/el', '/hu', '/fi', '/no', '/nb', '/da', '/uk', '/uk-ua',
+  '/intl', '/international', '/global',
+  // common site words
+  'registrar', 'pricing', 'plans', 'features', 'careers', 'jobs', 'support',
+  'community', 'status', 'privacy', 'terms', 'policy', 'legal', 'press',
+  'investors', 'partners', 'affiliates', 'enterprise', 'solutions',
+  'resources', 'customers', 'events', 'get-started', 'sign-up', 'log-in',
+  'create-account', 'forgot-password', 'reset-password', 'changelog',
+  'release-notes', 'whats-new', 'learn-more', 'free-trial', 'book-a-demo',
+];
+
+// ---- extended table: full domains and words that beat core tokenization ----
 const extended = [];
-for (const d of ordered) {
-  if (coreCost(d) > 3) extended.push(d);
+const extSeen = new Set();
+for (const s of [...ordered, ...GLOBAL_WORDS]) {
+  if (extSeen.has(s)) continue;
+  if (coreCost(s) > 3) {
+    extSeen.add(s);
+    extended.push(s);
+  }
 }
 
 // ---------------------------------------------------------------- emit
@@ -144,19 +170,27 @@ const out = `// Shared URL dictionary — "preset dictionary" compression (the t
 // data/top-1000-domains.txt (Cisco Umbrella top-1M, worldwide ranking,
 // deduped) — additions may be appended, never reordered or removed.
 //
-// Extended tokens: full domains from the top-1000 list, encoded as 3 bytes
-// (0xFF, 0x80|hi, lo). They are only emitted when they beat the core tokens,
-// so links that don't need them stay readable by older pages (payload flags
-// 1/2). Streams that DO use them carry payload flag 3/4 (u1: flag bits
-// 4+5); an old page misdecoding one always hits a >=0x80 byte, so it fails
-// loudly with an invalid URL instead of silently landing somewhere wrong.
+// Extended tokens: full domains from the worldwide top-1000 plus generic
+// locale prefixes and common site words, encoded as 3 bytes
+// (0xFF, 0x80|hi, lo). They are only emitted when they beat the core
+// tokens, so links that don't need them stay readable by older pages
+// (payload flags 1/2). Streams that DO use them carry payload flag 3/4
+// (u1: flag bits 4+5); an old page misdecoding one always hits a >=0x80
+// byte, so it fails loudly with an invalid URL instead of silently
+// landing somewhere wrong.
+//
+// Stream tiers (payload flag byte / u1 bits):
+//   legacy (1/2, bit4)       core tokens + 0xFF <byte> literals
+//   v2     (3/4, bit4+5)     + extended tokens and high-byte literals
+//   v3     (5/6, bit4+5+6)   + literal runs: 0xFF 0x00 n <n bytes>
+//                            (long unknown words cost n+2 instead of 2n)
 
 const TOKENS = ${list(fullCore)};
 
 if (TOKENS.length > 255) throw new Error('dictionary too large');
 
-// Full-domain extended tokens (Cisco Umbrella worldwide top-1000,
-// minus domains the core tokens already cover in <=3 bytes).
+// Extended tokens (Cisco Umbrella worldwide top-1000 + locale/word tokens,
+// minus anything the core tokens already cover in <=3 bytes).
 const EXTENDED = ${list(extended)};
 
 function buildTrie() {
@@ -234,13 +268,16 @@ export function dictCompress(bytes) {
   return new Uint8Array(out);
 }
 
-// v2 compressor: adds 3-byte extended tokens when they beat the core, and
-// v2 literal escapes (NUL/high bytes). Returns extended=true whenever the
-// stream needs the v2 decoder, i.e. payload flags 3/4 instead of 1/2.
+// v2/v3 compressor: adds 3-byte extended tokens when they beat the core,
+// plus literal runs for long unknown words. Returns the stream tier:
+//   'legacy' — core tokens + 0xFF <byte> escapes (payload flags 1/2)
+//   'v2'     — extended tokens or high-byte literals (payload flags 3/4)
+//   'v3'     — literal runs used (payload flags 5/6, u1 bit4+5+6)
 export function dictCompressEx(bytes) {
   const out = [];
   let i = 0;
-  let extended = false;
+  let usedV2 = false;
+  let usedRun = false;
   while (i < bytes.length) {
     const { match, matchLen } = trieMatch(bytes, i);
     const e = extMatch(bytes, i);
@@ -249,17 +286,35 @@ export function dictCompressEx(bytes) {
       i += matchLen;
     } else if (e.len > 0) {
       out.push(ESC, 0x80 | (e.idx >> 8), e.idx & 0xff);
-      extended = true;
+      usedV2 = true;
       i += e.len;
     } else {
-      const b = bytes[i];
-      if (b === 0) { out.push(ESC, 0, 0); extended = true; }
-      else if (b < 0x80) out.push(ESC, b);
-      else { out.push(ESC, 0, b); extended = true; }
-      i++;
+      // maximal run of bytes with no token match at any position
+      let run = 0;
+      while (i + run < bytes.length &&
+             trieMatch(bytes, i + run).match === -1 &&
+             extMatch(bytes, i + run).len === 0) run++;
+      if (run >= 3) {
+        while (run > 0) {
+          const n = Math.min(run, 255);
+          out.push(ESC, 0, n);
+          for (let k = 0; k < n; k++) out.push(bytes[i + k]);
+          i += n;
+          run -= n;
+        }
+        usedRun = true;
+      } else {
+        for (let k = 0; k < run; k++) {
+          const b = bytes[i];
+          if (b === 0 || b >= 0x80) { out.push(ESC, 0, b); usedV2 = true; }
+          else out.push(ESC, b);
+          i++;
+        }
+      }
     }
   }
-  return { bytes: new Uint8Array(out), extended };
+  const tier = usedRun ? 'v3' : usedV2 ? 'v2' : 'legacy';
+  return { bytes: new Uint8Array(out), tier };
 }
 
 // v1 decoder (payload flags 1/2 and u1 bit4-only links).
@@ -294,6 +349,36 @@ export function dictDecompress(bytes) {
         for (let k = 0; k < s.length; k++) out.push(s.charCodeAt(k) & 0xff);
       } else if (n === 0) {
         out.push(bytes[++i] ?? 0);
+      } else {
+        out.push(n);
+      }
+    } else {
+      const tok = TOKENS[b];
+      if (tok === undefined) throw new Error(\`unknown dictionary token \${b}\`);
+      for (let k = 0; k < tok.length; k++) out.push(tok.charCodeAt(k) & 0xff);
+    }
+  }
+  return new Uint8Array(out);
+}
+
+// v3 decoder (payload flags 5/6, u1 bit4+5+6): adds literal runs —
+// 0xFF 0x00 n <n literal bytes>. Extended tokens and 0xFF b literals
+// decode exactly as in v2.
+export function dictDecompressV3(bytes) {
+  const out = [];
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if (b === ESC) {
+      const n = bytes[++i];
+      if (n === undefined) { out.push(0); break; }
+      if (n >= 0x80) {
+        const idx = ((n & 0x7f) << 8) | (bytes[++i] ?? 0);
+        const s = EXTENDED[idx];
+        if (s === undefined) throw new Error(\`unknown extended token \${idx}\`);
+        for (let k = 0; k < s.length; k++) out.push(s.charCodeAt(k) & 0xff);
+      } else if (n === 0) {
+        const len = bytes[++i] ?? 0;
+        for (let k = 0; k < len; k++) out.push(bytes[++i] ?? 0);
       } else {
         out.push(n);
       }
