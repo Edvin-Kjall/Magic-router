@@ -238,6 +238,26 @@ test('plain (unencrypted) short links round-trip and are much shorter', async ()
   assert.ok(www.length < 'https://www.inosida.se'.length, 'www link should beat the original');
 });
 
+test('dictionary compression round-trips and helps typical URLs', async () => {
+  const { dictCompress, dictDecompress } = await import('../site/public/lib/dict.js');
+  const compressible = [
+    'https://www.inosida.se/nyheter/article?id=42&utm_source=twitter&utm_medium=social',
+    'https://example.com/api/v1/users?id=42&search=query&page=2',
+  ];
+  for (const s of compressible) {
+    const bytes = new TextEncoder().encode(s);
+    const c = dictCompress(bytes);
+    assert.deepEqual(dictDecompress(c), bytes);
+    assert.ok(c.length < bytes.length, `${s} should compress (${c.length} vs ${bytes.length})`);
+  }
+  // domain-specific URLs may not compress — they still round-trip exactly,
+  // and callers only apply the dictionary when it is actually smaller.
+  const plain = new TextEncoder().encode('https://github.com/edvin/magic-router/blob/main/README.md');
+  assert.deepEqual(dictDecompress(dictCompress(plain)), plain);
+  const bare = new TextEncoder().encode('zzz-no-tokens-here');
+  assert.deepEqual(dictDecompress(dictCompress(bare)), bare);
+});
+
 test('envelope links stay reasonable in size', async () => {
   // Node has no CompressionStream, so links are uncompressed here; browsers
   // deflate the envelope and produce much shorter links. v5 direct mode (no

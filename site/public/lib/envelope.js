@@ -26,6 +26,7 @@ import { deriveKey, ARGON2ID } from './kd.js';
 import { aesEncrypt, aesDecrypt, aesEncryptNoIv, aesDecryptNoIv, importAesKey } from './aes.js';
 import { splitSecret, combineShares } from './shamir.js';
 import { hashChain } from './timelock.js';
+import { dictCompress, dictDecompress } from './dict.js';
 
 export const PREFIX = 's3.';
 export const COMPACT_PREFIX = 's5.';
@@ -43,6 +44,29 @@ export class SealError extends Error {}
 
 async function sha256(bytes) {
   return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+}
+
+// Payload pre-compression for URL payloads: shared dictionary + deflate
+// BEFORE encryption. Flag byte: 0 raw · 1 dict+deflate · 2 dict-only.
+// URLs always start with 'h', so legacy flag-less payloads are unambiguous.
+// (Safe against CRIME-style attacks: links are created once by their owner,
+// with no attacker-influenced plaintext oracle.)
+async function preparePayload(type, data) {
+  const raw = toBytes(String(data));
+  if (type !== 'url') return raw;
+  const d = dictCompress(raw);
+  if (d.length >= raw.length) return concatBytes(new Uint8Array([0]), raw);
+  const { flag, bytes } = await deflateMaybe(d);
+  return concatBytes(new Uint8Array([flag ? 1 : 2]), bytes);
+}
+
+async function restorePayload(type, bytes) {
+  if (type !== 'url' || bytes.length === 0) return bytes;
+  const f = bytes[0];
+  if (f === 0) return bytes.subarray(1);
+  if (f === 1) return dictDecompress(await inflateMaybe(1, bytes.subarray(1)));
+  if (f === 2) return dictDecompress(bytes.subarray(1));
+  return bytes; // legacy flag-less payload
 }
 
 export function isSealedLink(s) {
@@ -136,7 +160,7 @@ export function isPlainLink(s) {
 
 export async function encodePlainUrl(url) {
   let s = String(url);
-  let flags = 0; // bit0 compressed · bits1-2 scheme (0 none, 1 http, 2 https) · bit3 www. stripped
+  let flags = 0; // bit0 deflated · bits1-2 scheme (0 none, 1 http, 2 https) · bit3 www. stripped · bit4 dictionary-tokenized
   if (/^https:\/\//i.test(s)) {
     flags |= 2 << 1;
     s = s.slice(8);
@@ -148,7 +172,13 @@ export async function encodePlainUrl(url) {
     flags |= 1 << 3;
     s = s.slice(4);
   }
-  const { flag, bytes } = await deflateMaybe(toBytes(s));
+  let body = toBytes(s);
+  const d = dictCompress(body);
+  if (d.length < body.length) {
+    flags |= 1 << 4;
+    body = d;
+  }
+  const { flag, bytes } = await deflateMaybe(body);
   const outFlags = flags | flag;
   return PLAIN_PREFIX + bytesToB64u(concatBytes(new Uint8Array([outFlags]), bytes));
 }
@@ -158,7 +188,8 @@ export async function decodePlainUrl(str) {
   const raw = b64uToBytes(str);
   const flags = raw[0];
   const scheme = (flags >> 1) & 3;
-  const bytes = await inflateMaybe(flags & 1, raw.subarray(1));
+  let bytes = await inflateMaybe(flags & 1, raw.subarray(1));
+  if (flags & 16) bytes = dictDecompress(bytes);
   let s = toStr(bytes);
   if (flags & 8) s = 'www.' + s;
   if (scheme === 2) s = 'https://' + s;
@@ -892,7 +923,7 @@ export async function seal(opts = {}) {
         m: bytesToB64u(new Uint8Array(enc.cipherText)),
       });
     }
-    env.payload = { ct: bytesToB64u(await aesEncryptNoIv(key, toBytes(String(data)))) };
+    env.payload = { ct: bytesToB64u(await aesEncryptNoIv(key, await preparePayload(type, data))) };
     if (signer) await signEnvelope(env, signer, { pq });
     return env;
   }
@@ -925,7 +956,7 @@ export async function seal(opts = {}) {
   if (meta.time) payloadKey = await hashChain(K, b64uToBytes(meta.time.salt), meta.time.n);
 
   const key = await importAesKey(payloadKey);
-  env.payload = { ct: bytesToB64u(await aesEncryptNoIv(key, toBytes(String(data)))) };
+  env.payload = { ct: bytesToB64u(await aesEncryptNoIv(key, await preparePayload(type, data))) };
   if (signer) await signEnvelope(env, signer, { pq });
   return env;
 }
@@ -942,7 +973,8 @@ export async function open(str, creds = {}) {
   if (!env.thr && env.wrap?.length === 1 && env.wrap[0].direct) {
     const key = await deriveDirectKey(env.wrap[0], creds);
     if (!key) throw new SealError('None of the provided credentials unlocked this link');
-    const data = toStr(await aesDecryptNoIv(key, b64uToBytes(env.payload.ct)));
+    const pt = await restorePayload(env.t, await aesDecryptNoIv(key, b64uToBytes(env.payload.ct)));
+    const data = toStr(pt);
     return { type: env.t, data, meta: env.meta, env };
   }
 
@@ -986,7 +1018,11 @@ export async function open(str, creds = {}) {
   if (env.meta?.time) K = await hashChain(K, b64uToBytes(env.meta.time.salt), env.meta.time.n);
 
   const key = await importAesKey(K);
-  const data = toStr(await (noIv ? aesDecryptNoIv(key, b64uToBytes(env.payload.ct)) : aesDecrypt(key, b64uToBytes(env.payload.ct))));
+  const pt = await restorePayload(
+    env.t,
+    await (noIv ? aesDecryptNoIv(key, b64uToBytes(env.payload.ct)) : aesDecrypt(key, b64uToBytes(env.payload.ct)))
+  );
+  const data = toStr(pt);
   return { type: env.t, data, meta: env.meta, env };
 }
 

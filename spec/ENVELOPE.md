@@ -46,6 +46,24 @@ u16 payloadLen + payload ciphertext
 `ct` fields are ciphertext||tag with the implicit zero IV (see v5 notes).
 A typical one-password link is ~60 bytes ≈ 80 base64url characters.
 
+### Payload pre-compression (all versions ≥ v6)
+
+For `type: "url"` payloads only, the plaintext is compressed BEFORE encryption:
+a shared ~150-token URL dictionary (schemes, TLDs, common path/query fragments;
+the "preset dictionary" technique Brotli uses), optionally followed by
+deflate-raw. The decrypted plaintext starts with a flag byte:
+
+```
+0x00  raw URL follows (dictionary did not help)
+0x01  dict-tokenized, then deflate-raw compressed
+0x02  dict-tokenized only
+```
+
+No flag byte = legacy payload (pre-dictionary). URLs always begin with `h`,
+so the flag never collides with legacy content. Safe against CRIME-style
+attacks: links are created once by their owner, with no attacker-influenced
+plaintext oracle.
+
 ## v5 changes: IV-less GCM and direct mode
 
 - **No per-ciphertext IVs.** Every key in the protocol is single-use (a fresh
