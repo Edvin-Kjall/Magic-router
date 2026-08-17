@@ -30,9 +30,11 @@ import { hashChain } from './timelock.js';
 export const PREFIX = 's3.';
 export const COMPACT_PREFIX = 's5.';
 export const LEGACY_COMPACT_PREFIX = 's4.';
+export const BINARY_PREFIX = 's6.';
 export const VERSION = 3;
 export const COMPACT_VERSION = 5;
 export const LEGACY_COMPACT_VERSION = 4;
+export const BINARY_VERSION = 6;
 export const KDF_DEFAULT = ARGON2ID;
 
 export class SealError extends Error {}
@@ -44,13 +46,13 @@ async function sha256(bytes) {
 }
 
 export function isSealedLink(s) {
-  return typeof s === 'string' && /^(s3\.|s4\.|s5\.|v1\.|v2\.)/.test(s);
+  return typeof s === 'string' && /^(s3\.|s4\.|s5\.|s6\.|v1\.|v2\.)/.test(s);
 }
 
 // s3.<env>.<embedded-password> → { env, tail }. The envelope itself is
 // base64url, so the first '.' after the prefix delimits it.
 export function splitEmbedded(str) {
-  if (!str.startsWith(PREFIX) && !str.startsWith(COMPACT_PREFIX) && !str.startsWith(LEGACY_COMPACT_PREFIX)) {
+  if (!str.startsWith(PREFIX) && !str.startsWith(COMPACT_PREFIX) && !str.startsWith(LEGACY_COMPACT_PREFIX) && !str.startsWith(BINARY_PREFIX)) {
     return { env: str, tail: null };
   }
   const i = str.indexOf('.', 3);
@@ -237,14 +239,198 @@ function expandCompact(c, version) {
   return env;
 }
 
+// --------------------------------------------------- binary v6 encoding
+
+// Pure binary envelope — no JSON, no key names, no compression (ciphertext
+// is random and incompressible anyway). ~45% shorter than the v5 JSON form.
+// Byte layout (big-endian numbers):
+//   u8 version (6)
+//   u8 flags: bit0 type (0=url 1=text), bit1 hasMeta, bit2 hasThr
+//   [meta: u8 flags — bit0 host, bit1 exp, bit2 note, bit3 time, bit4 sig
+//     host:  u8 len + utf8
+//     exp:   u48 unix ms
+//     note:  u16 len + utf8
+//     time:  u48 n + 16-byte salt
+//     sig:   u8 count, then per sig: u8 alg (1=ed25519 2=mldsa65),
+//            u8 nameLen + utf8, u16 pkLen + pk, u16 sigLen + sig]
+//   [thr: u8 n, u8 m]
+//   u8 wrapCount, then per wrapper:
+//     u8 kind: bits0-1 kind (0 pass,1 embed,2 prf,3 pub), bit7 direct
+//     pass/embed: u8 kdf (0 argon2id 64/3/1, 1 fast, 2 pbkdf2+u32 i) + 16 salt
+//                 + [48 ct unless direct]
+//     prf: 32 salt + u8 cidLen + cid + [32 ct unless direct]
+//     pub: 32 x + 1088 mlkem + [48 ct unless direct]
+//     + [u8 xi if thr]
+//   u16 payloadLen + payload ciphertext
+const KIND_NUM = { pass: 0, embed: 1, prf: 2, pub: 3 };
+const KIND_BACK = ['pass', 'embed', 'prf', 'pub'];
+const MLKEM_CT_LEN = 1088;
+
+function numBytes(n, len) {
+  const out = new Array(len);
+  for (let i = len - 1; i >= 0; i--) {
+    out[i] = n & 255;
+    n = Math.floor(n / 256);
+  }
+  return out;
+}
+
+function binaryEncode(env) {
+  const out = [];
+  const m = env.meta || {};
+  const hasMeta = m.host != null || m.exp != null || m.note != null || m.time != null || (m.sig?.length > 0);
+  const flags = (env.t === 'text' ? 1 : 0) | (hasMeta ? 2 : 0) | (env.thr ? 4 : 0);
+  out.push(BINARY_VERSION, flags);
+
+  if (hasMeta) {
+    let mf = 0;
+    if (m.host != null) mf |= 1;
+    if (m.exp != null) mf |= 2;
+    if (m.note != null) mf |= 4;
+    if (m.time != null) mf |= 8;
+    if (m.sig?.length) mf |= 16;
+    out.push(mf);
+    if (m.host != null) {
+      const b = toBytes(m.host);
+      out.push(b.length, ...b);
+    }
+    if (m.exp != null) out.push(...numBytes(Date.parse(m.exp), 6));
+    if (m.note != null) {
+      const b = toBytes(m.note);
+      out.push(...numBytes(b.length, 2), ...b);
+    }
+    if (m.time != null) {
+      out.push(...numBytes(m.time.n, 6), ...b64uToBytes(m.time.salt));
+    }
+    if (m.sig?.length) {
+      out.push(m.sig.length);
+      for (const s of m.sig) {
+        out.push(s.alg === 'ed25519' ? 1 : s.alg === 'mldsa65' ? 2 : 0);
+        const nb = toBytes(s.name);
+        out.push(nb.length, ...nb);
+        const pk = b64uToBytes(s.pk);
+        out.push(...numBytes(pk.length, 2), ...pk);
+        const sg = b64uToBytes(s.sig);
+        out.push(...numBytes(sg.length, 2), ...sg);
+      }
+    }
+  }
+
+  if (env.thr) out.push(env.thr.n, env.thr.m);
+  out.push(env.wrap.length);
+  for (const w of env.wrap) {
+    out.push(KIND_NUM[w.k] | (w.direct ? 128 : 0));
+    if (w.k === 'pass' || w.k === 'embed') {
+      const kd = w.kd;
+      out.push(kd.algo === 'argon2id' ? (kd.m === 8192 && kd.t === 1 ? 1 : 0) : 2);
+      if (kd.algo !== 'argon2id') out.push(...numBytes(kd.i ?? 210000, 4));
+      out.push(...b64uToBytes(w.s));
+      if (!w.direct) out.push(...b64uToBytes(w.ct));
+    } else if (w.k === 'prf') {
+      out.push(...b64uToBytes(w.s));
+      const cid = b64uToBytes(w.cid);
+      out.push(cid.length, ...cid);
+      if (!w.direct) out.push(...b64uToBytes(w.ct));
+    } else if (w.k === 'pub') {
+      out.push(...b64uToBytes(w.x), ...b64uToBytes(w.m));
+      if (!w.direct) out.push(...b64uToBytes(w.ct));
+    }
+    if (env.thr) out.push(w.xi);
+  }
+
+  const p = b64uToBytes(env.payload.ct);
+  out.push(...numBytes(p.length, 2), ...p);
+  return new Uint8Array(out);
+}
+
+function binaryReader(bytes) {
+  let off = 0;
+  return {
+    u8: () => bytes[off++],
+    bytes: (n) => {
+      const s = bytes.subarray(off, off + n);
+      off += n;
+      return s;
+    },
+    num: (n) => {
+      let v = 0;
+      for (let i = 0; i < n; i++) v = v * 256 + bytes[off++];
+      return v;
+    },
+    done: () => off === bytes.length,
+  };
+}
+
+function binaryDecode(bytes) {
+  const r = binaryReader(bytes);
+  if (r.u8() !== BINARY_VERSION) throw new SealError('unsupported binary envelope version');
+  const flags = r.u8();
+  const env = { v: BINARY_VERSION, t: flags & 1 ? 'text' : 'url', meta: {}, wrap: [], payload: {} };
+  if (flags & 2) {
+    const mf = r.u8();
+    if (mf & 1) env.meta.host = toStr(r.bytes(r.u8()));
+    if (mf & 2) env.meta.exp = new Date(r.num(6)).toISOString();
+    if (mf & 4) env.meta.note = toStr(r.bytes(r.num(2)));
+    if (mf & 8) env.meta.time = { n: r.num(6), salt: bytesToB64u(r.bytes(16)) };
+    if (mf & 16) {
+      const count = r.u8();
+      env.meta.sig = [];
+      for (let i = 0; i < count; i++) {
+        const alg = r.u8();
+        env.meta.sig.push({
+          alg: alg === 2 ? 'mldsa65' : 'ed25519',
+          name: toStr(r.bytes(r.u8())),
+          pk: bytesToB64u(r.bytes(r.num(2))),
+          sig: bytesToB64u(r.bytes(r.num(2))),
+        });
+      }
+    }
+  }
+  if (flags & 4) env.thr = { n: r.u8(), m: r.u8() };
+  const wc = r.u8();
+  for (let i = 0; i < wc; i++) {
+    const b = r.u8();
+    const direct = !!(b & 128);
+    const kind = KIND_BACK[b & 3];
+    const w = { k: kind };
+    if (direct) w.direct = true;
+    if (kind === 'pass' || kind === 'embed') {
+      const kdFlag = r.u8();
+      if (kdFlag === 0) w.kd = { algo: 'argon2id', m: 65536, t: 3, p: 1 };
+      else if (kdFlag === 1) w.kd = { algo: 'argon2id', m: 8192, t: 1, p: 1 };
+      else w.kd = { algo: 'pbkdf2', i: r.num(4), hash: 'SHA-256' };
+      w.s = bytesToB64u(r.bytes(16));
+      if (!direct) w.ct = bytesToB64u(r.bytes(48));
+    } else if (kind === 'prf') {
+      w.s = bytesToB64u(r.bytes(32));
+      w.cid = bytesToB64u(r.bytes(r.u8()));
+      if (!direct) w.ct = bytesToB64u(r.bytes(32));
+    } else {
+      w.x = bytesToB64u(r.bytes(32));
+      w.m = bytesToB64u(r.bytes(MLKEM_CT_LEN));
+      if (!direct) w.ct = bytesToB64u(r.bytes(48));
+    }
+    if (env.thr) w.xi = r.u8();
+    env.wrap.push(w);
+  }
+  env.payload.ct = bytesToB64u(r.bytes(r.num(2)));
+  return env;
+}
+
 export async function encodeEnvelope(env, opts = {}) {
-  const json = toBytes(JSON.stringify(opts.legacy ? env : compactEnvelope(env)));
-  const { flag, bytes } = await deflateMaybe(json);
-  const prefix = opts.legacy ? PREFIX : COMPACT_PREFIX;
-  return prefix + bytesToB64u(concatBytes(new Uint8Array([flag]), bytes));
+  if (opts.legacy) {
+    const json = toBytes(JSON.stringify(env));
+    const { flag, bytes } = await deflateMaybe(json);
+    return PREFIX + bytesToB64u(concatBytes(new Uint8Array([flag]), bytes));
+  }
+  return BINARY_PREFIX + bytesToB64u(binaryEncode(env));
 }
 
 export async function decodeEnvelope(str) {
+  if (str.startsWith(BINARY_PREFIX)) {
+    str = str.slice(BINARY_PREFIX.length);
+    return binaryDecode(b64uToBytes(str));
+  }
   if (str.startsWith(COMPACT_PREFIX)) {
     str = str.slice(COMPACT_PREFIX.length);
     const raw = b64uToBytes(str);

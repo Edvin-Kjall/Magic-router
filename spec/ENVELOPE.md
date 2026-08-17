@@ -1,10 +1,11 @@
-# Magic Router Envelope — format specification, v3 + v4
+# Magic Router Envelope — format specification, v3/v4/v5
 
 A sealed link is a URL fragment (or path segment) of the form:
 
 ```
-s3.<base64url( FLAG || maybe-deflate( JSON ) )>[.<embedded-password>]   ← v3 (verbose)
-s4.<base64url( FLAG || maybe-deflate( JSON ) )>[.<embedded-password>]   ← v4 (compact)
+s3.<base64url( FLAG || maybe-deflate( JSON ) )>[.<embedded-password>]   ← v3 (verbose, IV-carrying)
+s4.<base64url( FLAG || maybe-deflate( JSON ) )>[.<embedded-password>]   ← v4 (compact keys, IV-carrying)
+s5.<base64url( FLAG || maybe-deflate( JSON ) )>[.<embedded-password>]   ← v5 (compact keys, IV-less, direct mode)
 ```
 
 - `FLAG` is one byte: `0x01` = the JSON is deflate-raw compressed, `0x00` = raw UTF-8.
@@ -12,7 +13,27 @@ s4.<base64url( FLAG || maybe-deflate( JSON ) )>[.<embedded-password>]   ← v4 (
 - The optional `.`-terminated tail after the envelope is the **embedded password**
   (percent-encoded in the full URL). Its presence selects auto-open mode; the envelope
   contains a matching `embed` wrapper.
-- Decoders MUST accept both `s3.` and `s4.`. New links SHOULD be encoded as `s4.`.
+- Decoders MUST accept `s3.`, `s4.` and `s5.`. New links SHOULD be encoded as `s5.`.
+
+## v5 changes: IV-less GCM and direct mode
+
+- **No per-ciphertext IVs.** Every key in the protocol is single-use (a fresh
+  random payload key, or a key derived from a fresh random salt), so AES-GCM
+  uses a fixed all-zero IV. `ct` fields contain only ciphertext||tag. This is
+  safe precisely because keys never repeat across links.
+- **Direct mode.** When a link has exactly one unlock method (and no threshold
+  or time-lock), the payload is encrypted directly under that method's key —
+  the wrap layer disappears entirely. Direct wrappers carry no `ct`:
+
+| kind | v5 key | wrapper contents |
+|---|---|---|
+| password | `P` | `d` (kdf), `s` (salt) |
+| embedded | `E` | `d`, `s` |
+| passkey | `R` | `q` (credential id), `s` (PRF salt) |
+| recipient key | `U` | `x` (eph X25519 pk), `y` (ML-KEM ct) |
+
+Wrapped mode (multiple methods, thresholds, time-locks) keeps the lowercase
+keys (`p`/`e`/`r`/`u`) with IV-less `c` fields, exactly as v4 but without IVs.
 
 ## v4 compact keys
 

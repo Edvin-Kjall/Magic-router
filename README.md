@@ -121,8 +121,9 @@ tests/                  node:test suites (22 tests)
 
 ## Honest limits
 
-- Links are **not short** — they carry their own ciphertext (typically ~300 chars for a
-  one-password link; the compact v4 encoding keeps even rich links well under 2 KB).
+- Links are **not short** — they carry their own ciphertext (typically ~200 chars for a
+  one-password link thanks to the v5 direct-mode encoding; even rich links stay well
+  under 2 KB).
 - Stateless links **cannot be revoked or expired** — only passwords can stop being
   shared. Premium mode trades a little state for those features.
 - Browsers store full URLs in history and sync them; embedded-password links are

@@ -241,8 +241,8 @@ test('envelope links stay reasonable in size', async () => {
   // wrap layer, no IVs) keeps even node-built links small.
   const env = await seal({ type: 'url', data: 'https://example.com/a', passwords: ['pw'], kdf: KDF });
   const str = await encodeEnvelope(env);
-  assert.ok(str.startsWith('s5.'), 'new links use the compact s5 encoding');
-  assert.ok(str.length < 220, `link too long: ${str.length}`);
+  assert.ok(str.startsWith('s6.'), 'new links use the binary s6 encoding');
+  assert.ok(str.length < 120, `link too long: ${str.length}`);
 });
 
 test('legacy v3 (s3.) envelopes still encode and decode', async () => {
