@@ -215,11 +215,19 @@ async function onCreate(e) {
       const raw = $('payload').value.trim();
       if (!/^https?:\/\//i.test(raw)) throw new SealError('Short mode needs a URL — it must start with https://');
       const full = await encodePlainUrl(raw);
-      const linkUrl = $('adv-path').checked
-        ? `${location.origin}/_u/${full}`
-        : `${location.origin}/#${full}`;
+      // encodePlainUrl returns the URL itself when compression can't win —
+      // never wrap a non-link in the router prefix in that case.
+      const isLink = full !== raw;
+      const linkUrl = !isLink
+        ? raw
+        : $('adv-path').checked
+          ? `${location.origin}/_u/${full}`
+          : `${location.origin}/#${full}`;
       $('link-out').value = linkUrl;
-      if (linkUrl.length >= raw.length) {
+      if (!isLink) {
+        $('result-hint').textContent =
+          'No compression win: this URL would only get longer as a link, so here it is unchanged. Sharing it directly is the shortest possible form.';
+      } else if (linkUrl.length >= raw.length) {
         // Honesty: the router's own host prefix means short destinations
         // are shorter on their own.
         $('result-hint').textContent =

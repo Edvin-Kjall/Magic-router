@@ -188,7 +188,8 @@ export function isPlainLink(s) {
 }
 
 export async function encodePlainUrl(url) {
-  let s = String(url);
+  const original = String(url);
+  let s = original;
   let flags = 0; // bit0 deflated · bits1-2 scheme (0 none, 1 http, 2 https) · bit3 www. stripped · bit4 dictionary-tokenized · bit5 v2 (extended) · bit6 v3 (runs) · bit7 deep
   if (/^https:\/\//i.test(s)) {
     flags |= 2 << 1;
@@ -222,7 +223,11 @@ export async function encodePlainUrl(url) {
   const { flag, bytes } = await deflateMaybe(body);
   const outFlags = flags | flag;
   const prefix = tier === 'deep' ? PLAIN_PREFIX_DEEP : PLAIN_PREFIX;
-  return prefix + bytesToB64u(concatBytes(new Uint8Array([outFlags]), bytes));
+  const link = prefix + bytesToB64u(concatBytes(new Uint8Array([outFlags]), bytes));
+  // Hard invariant: a "short" link is never longer than the URL it points
+  // to. When compression can't win, hand back the URL itself — it IS the
+  // shortest possible form.
+  return link.length < original.length ? link : original;
 }
 
 export async function decodePlainUrl(str) {

@@ -144,6 +144,16 @@ const GLOBAL_WORDS = [
   'resources', 'customers', 'events', 'get-started', 'sign-up', 'log-in',
   'create-account', 'forgot-password', 'reset-password', 'changelog',
   'release-notes', 'whats-new', 'learn-more', 'free-trial', 'book-a-demo',
+  // camelCase query keys (e-commerce and catalog sites)
+  'productId', 'categoryId', 'itemId', 'orderId', 'userId', 'sessionId',
+  'cartId', 'storeId', 'brandId', 'colorId', 'sizeId', 'styleId',
+  'articleId', 'productCode', 'articleNumber', 'catalogId', 'langId',
+  'siteId', 'pageId', 'variantId', 'skuId', 'quantity', 'productName',
+  'pageSize', 'sortBy', 'filterBy', 'countryCode', 'currencyCode',
+  // underscore locale paths (retailer i18n routes)
+  '/sv_se', '/en_us', '/en_gb', '/en_au', '/en_ca', '/de_de', '/fr_fr',
+  '/es_es', '/it_it', '/nl_nl', '/pt_br', '/ja_jp', '/zh_cn', '/ko_kr',
+  '/ru_ru', '/tr_tr', '/pl_pl', '/da_dk', '/fi_fi', '/nb_no',
 ];
 
 // ---- extended table: full domains and words that beat core tokenization ----
