@@ -216,15 +216,21 @@ async function onCreate(e) {
       if (!/^https?:\/\//i.test(raw)) throw new SealError('Short mode needs a URL — it must start with https://');
       const full = await encodePlainUrl(raw);
       // encodePlainUrl returns the URL itself when compression can't win —
-      // never wrap a non-link in the router prefix in that case.
+      // never wrap a non-link in the router prefix in that case. Raw-mode
+      // (u0.) results contain path characters, so they only ever use the
+      // fragment form.
       const isLink = full !== raw;
-      const linkUrl = !isLink
-        ? raw
+      const isRaw = full.startsWith('u0.');
+      const linkUrl = !isLink || isRaw
+        ? (!isLink ? raw : `${location.origin}/#${full}`)
         : $('adv-path').checked
           ? `${location.origin}/_u/${full}`
           : `${location.origin}/#${full}`;
       $('link-out').value = linkUrl;
-      if (!isLink) {
+      if (isRaw) {
+        $('result-hint').textContent =
+          'The dictionary can barely shrink this URL — so the link is your URL with https:// stripped, with no base64 expansion. Every bit that could compress did; the rest travels as-is.';
+      } else if (!isLink) {
         $('result-hint').textContent =
           'No compression win: this URL would only get longer as a link, so here it is unchanged. Sharing it directly is the shortest possible form.';
       } else if (linkUrl.length >= raw.length) {

@@ -101,15 +101,18 @@ Stream tiers (chosen by the encoder, recorded in the flag byte):
 | v3 | 5/6 | `u1.` bit4+5+6 | + literal runs `0xFF 0x00 n <n bytes>` |
 | deep-v1 | 7/8 | `u2.` bit4+5+6+7 | v3 grammar, codes index the frozen deep-v1 table |
 | deep-v2 | 9/10 | `u3.` bit4+5+6+7 | v3 grammar, codes index the current deep-v2 table |
+| raw | — | `u0.` | no compression, no base64: one flags char (scheme/www bits) then the URL verbatim with `https://`/`www.` stripped; `#`→`%23` and `%`→`%25` |
 
 Every extended/deep token carries a ≥0x80 byte and every v3 run starts with
 `0xFF 0x00`, so an old page misdecoding a newer stream produces an invalid
 URL (control byte) and fails loudly instead of silently landing on the
 wrong site.
 
-Plain links use the same tiers via flag bits: `u1.` for the embedded
-dictionary tiers (bit4 = dict, bit5 = v2, bit6 = v3), `u2.` for the frozen
-deep-v1 table and `u3.` for the current deep-v2 table (bits 4+5+6+7).
+Plain links try the tiers best-first (deep → shallow → raw) and a plain
+link is **never longer than the original URL**: if nothing wins, the
+original URL itself is returned. `u1.` carries the embedded dictionary
+tiers (bit4 = dict, bit5 = v2, bit6 = v3), `u2.` the frozen deep-v1 table
+and `u3.` the current deep-v2 table (bits 4+5+6+7).
 
 No flag byte = legacy payload (pre-dictionary). URLs always begin with `h`,
 so the flag never collides with legacy content. Safe against CRIME-style

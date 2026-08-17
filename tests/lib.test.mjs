@@ -229,13 +229,29 @@ test('plain (unencrypted) short links round-trip and are much shorter', async ()
   const sealed = await encodeEnvelope(await seal({ type: 'url', data: target, passwords: ['pw'], kdf: KDF }));
   assert.ok(short.length < sealed.length, `plain ${short.length} should be shorter than sealed ${sealed.length}`);
 
-  // short URLs: when compression can't win, the URL itself is returned —
-  // a plain link is NEVER longer than the original URL
+  // short URLs: when compression can't win, raw mode strips the scheme
+  // instead (no base64 expansion) — a plain link is NEVER longer than the
+  // original URL, and usually still shorter
   const short2 = await encodePlainUrl('https://inosida.se');
-  assert.equal(short2, 'https://inosida.se', 'uncompressible URL should be returned unchanged');
+  assert.ok(short2.startsWith('u0.'), `uncompressible URL should use raw mode, got ${short2}`);
+  assert.ok(short2.length < 'https://inosida.se'.length, 'raw mode should still beat the original');
+  assert.equal(await decodePlainUrl(short2), 'https://inosida.se');
   const www = await encodePlainUrl('https://www.inosida.se');
   assert.equal(await decodePlainUrl(www), 'https://www.inosida.se');
   assert.ok(www.length < 'https://www.inosida.se'.length, 'www link should beat the original');
+});
+
+test('raw mode round-trips fragments and percent escapes', async () => {
+  const { encodePlainUrl, decodePlainUrl } = await import('../site/public/lib/envelope.js');
+  const url = 'https://inosida.se/nyheter/artikel-om-nagot#topp';
+  const out = await encodePlainUrl(url);
+  assert.ok(out.startsWith('u0.'), `expected raw mode, got ${out}`);
+  assert.ok(out.length < url.length, `raw mode should win (${out.length} vs ${url.length})`);
+  assert.equal(await decodePlainUrl(out), url);
+  // hand-built raw links (flags char C = https): fragments and percent
+  // escapes must survive the round-trip exactly
+  assert.equal(await decodePlainUrl('u0.Cinosida.se/s%C3%B6k%23topp'), 'https://inosida.se/s%C3%B6k#topp');
+  assert.equal(await decodePlainUrl('u0.Ca%2525b'), 'https://a%25b');
 });
 
 test('plain links are never longer than the original URL', async () => {
@@ -243,7 +259,9 @@ test('plain links are never longer than the original URL', async () => {
   const url = 'https://www2.hm.com/sv_se/dam/nyheter/se-alla.html?productId=1351649002';
   const out = await encodePlainUrl(url);
   assert.ok(out.length <= url.length, `link must never exceed the URL (${out.length} vs ${url.length})`);
-  assert.equal(out, url, 'uncompressible URL should be returned unchanged');
+  assert.ok(out.startsWith('u0.'), `raw mode should cover it, got ${out}`);
+  assert.ok(out.length < url.length, `raw mode should still win (${out.length} vs ${url.length})`);
+  assert.equal(await decodePlainUrl(out), url);
   // the previously generated long link still decodes exactly
   assert.equal(
     await decodePlainUrl('u1.BHd3dzIuaG0uY29tL3N2X3NlL2RhbS9ueWhldGVyL3NlLWFsbGEuaHRtbD9wcm9kdWN0SWQ9MTM1MTY0OTAwMg'),

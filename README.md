@@ -127,7 +127,9 @@ tests/                  node:test suites (22 tests)
   For the smallest possible links, the page downloads a bigger dictionary once
   (~100 KB, cached forever) that covers the top 10 000 domains and common words —
   that's the `u3.` plain links and payload flags 9/10 (older `u2.` links decode
-  against the frozen first-generation dictionary).
+  against the frozen first-generation dictionary). When even that can't win,
+  `u0.` raw mode strips `https://`/`www.` with no base64 expansion — a plain
+  link is never longer than the URL it points to.
 - Stateless links **cannot be revoked or expired** — only passwords can stop being
   shared. Premium mode trades a little state for those features.
 - Browsers store full URLs in history and sync them; embedded-password links are

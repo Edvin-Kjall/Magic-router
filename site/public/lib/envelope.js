@@ -188,13 +188,20 @@ async function inflateIfPossible(bytes) {
 // No crypto, no storage — just compression. Anyone holding the link can
 // decode the destination, which is exactly what "no encryption" means.
 // u2. is the same format with the downloadable deep dictionary v1 (bit7);
-// u3. with deep dictionary v2 (the current table).
+// u3. with deep dictionary v2 (the current table). u0. is the raw mode:
+// no compression, no base64 — the URL itself with https:// and www.
+// stripped, so even URLs the dictionary barely helps still come out
+// shorter than the original.
 export const PLAIN_PREFIX = 'u1.';
 export const PLAIN_PREFIX_DEEP = 'u2.';
 export const PLAIN_PREFIX_DEEP2 = 'u3.';
+export const PLAIN_PREFIX_RAW = 'u0.';
 
 export function isPlainLink(s) {
-  return typeof s === 'string' && (s.startsWith(PLAIN_PREFIX) || s.startsWith(PLAIN_PREFIX_DEEP) || s.startsWith(PLAIN_PREFIX_DEEP2));
+  return typeof s === 'string' && (
+    s.startsWith(PLAIN_PREFIX) || s.startsWith(PLAIN_PREFIX_DEEP) ||
+    s.startsWith(PLAIN_PREFIX_DEEP2) || s.startsWith(PLAIN_PREFIX_RAW)
+  );
 }
 
 export async function encodePlainUrl(url) {
@@ -235,12 +242,39 @@ export async function encodePlainUrl(url) {
   const prefix = tier === 'deep' ? PLAIN_PREFIX_DEEP2 : PLAIN_PREFIX;
   const link = prefix + bytesToB64u(concatBytes(new Uint8Array([outFlags]), bytes));
   // Hard invariant: a "short" link is never longer than the URL it points
-  // to. When compression can't win, hand back the URL itself — it IS the
-  // shortest possible form.
-  return link.length < original.length ? link : original;
+  // to. When the compressed forms can't win, fall back to the raw mode —
+  // the URL itself with scheme/www stripped (no base64 expansion at all) —
+  // and only if even that loses, hand back the URL unchanged.
+  if (link.length < original.length) return link;
+  let rawBody = original;
+  let v = 0; // bits: 1-2 scheme (1 http, 2 https) · bit3 www
+  if (/^https:\/\//i.test(rawBody)) {
+    v |= 2;
+    rawBody = rawBody.slice(8);
+  } else if (/^http:\/\//i.test(rawBody)) {
+    v |= 1;
+    rawBody = rawBody.slice(7);
+  }
+  if (/^www\./i.test(rawBody)) {
+    v |= 4;
+    rawBody = rawBody.slice(4);
+  }
+  const escaped = rawBody.replace(/%/g, '%25').replace(/#/g, '%23');
+  // single-char flags: first base64url char of byte (v << 2) holds v
+  const raw = PLAIN_PREFIX_RAW + bytesToB64u(new Uint8Array([v << 2]))[0] + escaped;
+  return raw.length < original.length ? raw : original;
 }
 
 export async function decodePlainUrl(str) {
+  if (str.startsWith(PLAIN_PREFIX_RAW)) {
+    const body = str.slice(PLAIN_PREFIX_RAW.length);
+    const v = b64uToBytes(body[0] + 'A')[0] >> 2;
+    let s = body.slice(1).replace(/%23/g, '#').replace(/%25/g, '%');
+    if (v & 4) s = 'www.' + s;
+    if ((v & 3) === 2) s = 'https://' + s;
+    else if ((v & 3) === 1) s = 'http://' + s;
+    return s;
+  }
   let deep = 0;
   if (str.startsWith(PLAIN_PREFIX_DEEP2)) {
     str = str.slice(PLAIN_PREFIX_DEEP2.length);
