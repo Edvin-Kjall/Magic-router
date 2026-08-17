@@ -7,7 +7,7 @@ import zlib from 'node:zlib';
 import { bytesToB64u, b64uToBytes, randomBytes, concatBytes } from '../site/public/lib/b64.js';
 import { ARGON2ID_FAST } from '../site/public/lib/kd.js';
 import { deriveKey } from '../site/public/lib/kd.js';
-import { aesEncrypt } from '../site/public/lib/aes.js';
+import { aesEncrypt, importAesKey } from '../site/public/lib/aes.js';
 import { splitSecret, combineShares } from '../site/public/lib/shamir.js';
 import {
   seal,
@@ -237,12 +237,12 @@ test('plain (unencrypted) short links round-trip and are much shorter', async ()
 
 test('envelope links stay reasonable in size', async () => {
   // Node has no CompressionStream, so links are uncompressed here; browsers
-  // deflate the envelope and produce much shorter links. Compact v4 keeps
-  // even node-built links small.
+  // deflate the envelope and produce much shorter links. v5 direct mode (no
+  // wrap layer, no IVs) keeps even node-built links small.
   const env = await seal({ type: 'url', data: 'https://example.com/a', passwords: ['pw'], kdf: KDF });
   const str = await encodeEnvelope(env);
-  assert.ok(str.startsWith('s4.'), 'new links use the compact s4 encoding');
-  assert.ok(str.length < 320, `link too long: ${str.length}`);
+  assert.ok(str.startsWith('s5.'), 'new links use the compact s5 encoding');
+  assert.ok(str.length < 220, `link too long: ${str.length}`);
 });
 
 test('legacy v3 (s3.) envelopes still encode and decode', async () => {
@@ -253,4 +253,25 @@ test('legacy v3 (s3.) envelopes still encode and decode', async () => {
   assert.equal(r.data, URL);
   const parsed = await decodeEnvelope(s3);
   assert.equal(parsed.v, 3);
+});
+
+test('legacy v4 (s4., IV-carrying) envelopes still open', async () => {
+  // Hand-build a v4 link exactly as the old encoder emitted it.
+  const salt = randomBytes(16);
+  const key = await deriveKey({ algo: 'argon2id', m: 8192, t: 1, p: 1, s: bytesToB64u(salt) }, 'pw');
+  const K = randomBytes(32);
+  const wrapCt = await aesEncrypt(key, K); // iv || ct
+  const payloadCt = await aesEncrypt(await importAesKey(K), new TextEncoder().encode(URL));
+  const compact = {
+    v: 4,
+    t: 'url',
+    m: {},
+    w: [{ k: 'p', d: 'f', s: bytesToB64u(salt), c: bytesToB64u(wrapCt) }],
+    p: { c: bytesToB64u(payloadCt) },
+  };
+  const raw = concatBytes(new Uint8Array([0]), new TextEncoder().encode(JSON.stringify(compact)));
+  const s4 = 's4.' + bytesToB64u(raw);
+  const r = await open(s4, { password: 'pw' });
+  assert.equal(r.data, URL);
+  await assert.rejects(open(s4, { password: 'wrong' }));
 });

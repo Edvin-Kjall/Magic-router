@@ -23,14 +23,16 @@ import {
   xorBytes,
 } from './b64.js';
 import { deriveKey, ARGON2ID } from './kd.js';
-import { aesEncrypt, aesDecrypt, importAesKey } from './aes.js';
+import { aesEncrypt, aesDecrypt, aesEncryptNoIv, aesDecryptNoIv, importAesKey } from './aes.js';
 import { splitSecret, combineShares } from './shamir.js';
 import { hashChain } from './timelock.js';
 
 export const PREFIX = 's3.';
-export const COMPACT_PREFIX = 's4.';
+export const COMPACT_PREFIX = 's5.';
+export const LEGACY_COMPACT_PREFIX = 's4.';
 export const VERSION = 3;
-export const COMPACT_VERSION = 4;
+export const COMPACT_VERSION = 5;
+export const LEGACY_COMPACT_VERSION = 4;
 export const KDF_DEFAULT = ARGON2ID;
 
 export class SealError extends Error {}
@@ -42,13 +44,15 @@ async function sha256(bytes) {
 }
 
 export function isSealedLink(s) {
-  return typeof s === 'string' && /^(s3\.|s4\.|v1\.|v2\.)/.test(s);
+  return typeof s === 'string' && /^(s3\.|s4\.|s5\.|v1\.|v2\.)/.test(s);
 }
 
 // s3.<env>.<embedded-password> → { env, tail }. The envelope itself is
 // base64url, so the first '.' after the prefix delimits it.
 export function splitEmbedded(str) {
-  if (!str.startsWith(PREFIX) && !str.startsWith(COMPACT_PREFIX)) return { env: str, tail: null };
+  if (!str.startsWith(PREFIX) && !str.startsWith(COMPACT_PREFIX) && !str.startsWith(LEGACY_COMPACT_PREFIX)) {
+    return { env: str, tail: null };
+  }
   const i = str.indexOf('.', 3);
   if (i === -1) return { env: str, tail: null };
   return { env: str.slice(0, i), tail: str.slice(i + 1) };
@@ -157,11 +161,15 @@ export async function decodePlainUrl(str) {
 
 // ------------------------------------------------------------ (en)coding
 
-// Compact v4 encoding: same data, short JSON keys. Shrinks links ~35-40%
-// (verbose key names + KDF parameters were the biggest fixed cost).
-// Decoders accept both s3. (verbose v3) and s4. (compact v4).
+// Compact v5 encoding: same data, short JSON keys, no per-ciphertext IVs
+// (every key in the protocol is single-use, so GCM's IV is a fixed constant)
+// and "direct" wrappers for single-method links (the payload is encrypted
+// directly under the method's key — no wrap layer). Decoders also accept
+// s3. (verbose v3) and s4. (compact v4, IV-carrying).
 const WK = { pass: 'p', embed: 'e', prf: 'r', pub: 'u' };
 const WK_BACK = { p: 'pass', e: 'embed', r: 'prf', u: 'pub' };
+const WK_DIRECT = { pass: 'P', embed: 'E', prf: 'R', pub: 'U' };
+const WK_DIRECT_BACK = { P: 'pass', E: 'embed', R: 'prf', U: 'pub' };
 
 function compactEnvelope(env) {
   const out = { v: COMPACT_VERSION, t: env.t };
@@ -175,7 +183,8 @@ function compactEnvelope(env) {
   }
   out.m = m;
   out.w = (env.wrap || []).map((w) => {
-    const c = { k: WK[w.k], c: w.ct };
+    const c = { k: w.direct ? WK_DIRECT[w.k] : WK[w.k] };
+    if (!w.direct) c.c = w.ct;
     if (w.s != null) c.s = w.s;
     if (w.k === 'pass' || w.k === 'embed') {
       const kd = w.kd;
@@ -199,8 +208,8 @@ function compactEnvelope(env) {
   return out;
 }
 
-function expandCompact(c) {
-  const env = { v: COMPACT_VERSION, t: c.t, meta: {}, wrap: [], payload: { ct: c.p.c } };
+function expandCompact(c, version) {
+  const env = { v: version, t: c.t, meta: {}, wrap: [], payload: { ct: c.p.c } };
   if (c.m) {
     if (c.m.h != null) env.meta.host = c.m.h;
     if (c.m.e != null) env.meta.exp = c.m.e;
@@ -209,7 +218,9 @@ function expandCompact(c) {
     if (c.m.g != null) env.meta.sig = c.m.g.map((s) => ({ alg: s.a, name: s.na, pk: s.k, sig: s.s }));
   }
   for (const w of c.w || []) {
-    const e = { k: WK_BACK[w.k], ct: w.c };
+    const direct = w.k in WK_DIRECT_BACK;
+    const e = { k: direct ? WK_DIRECT_BACK[w.k] : WK_BACK[w.k], ct: w.c };
+    if (direct) e.direct = true;
     if (w.s != null) e.s = w.s;
     if (w.d != null) {
       if (w.d === 'a') e.kd = { algo: 'argon2id', m: 65536, t: 3, p: 1 };
@@ -239,8 +250,15 @@ export async function decodeEnvelope(str) {
     const raw = b64uToBytes(str);
     const flag = raw[0];
     const bytes = await inflateMaybe(flag, raw.subarray(1));
-    const env = expandCompact(JSON.parse(toStr(bytes)));
-    if (env.v !== COMPACT_VERSION) throw new SealError(`unsupported envelope version: ${env.v}`);
+    const env = expandCompact(JSON.parse(toStr(bytes)), COMPACT_VERSION);
+    return env;
+  }
+  if (str.startsWith(LEGACY_COMPACT_PREFIX)) {
+    str = str.slice(LEGACY_COMPACT_PREFIX.length);
+    const raw = b64uToBytes(str);
+    const flag = raw[0];
+    const bytes = await inflateMaybe(flag, raw.subarray(1));
+    const env = expandCompact(JSON.parse(toStr(bytes)), LEGACY_COMPACT_VERSION);
     return env;
   }
   if (str.startsWith(PREFIX)) str = str.slice(PREFIX.length);
@@ -262,16 +280,16 @@ function canonicalWrap(w) {
   if (w.k === 'pass' || w.k === 'embed') {
     out.kd = { algo: w.kd.algo, m: w.kd.m, t: w.kd.t, p: w.kd.p, i: w.kd.i, hash: w.kd.hash };
     out.s = w.s;
-    out.ct = w.ct;
+    if (!w.direct) out.ct = w.ct;
   } else if (w.k === 'prf') {
     out.cid = w.cid;
     out.s = w.s;
-    out.ct = w.ct;
+    if (!w.direct) out.ct = w.ct;
   } else if (w.k === 'pub') {
     out.alg = w.alg ?? 'hybrid-x25519-mlkem768';
     out.x = w.x;
     out.m = w.m;
-    out.ct = w.ct;
+    if (!w.direct) out.ct = w.ct;
   }
   if (w.xi != null) out.xi = w.xi;
   return out;
@@ -296,7 +314,7 @@ async function wrapCredential(c, keyBytes, kdf) {
   if (c.k === 'pass' || c.k === 'embed') {
     const s = randomBytes(16);
     const key = await deriveKey({ ...kdf, s: bytesToB64u(s) }, c.password);
-    return { k: c.k, kd: { algo: kdf.algo, m: kdf.m, t: kdf.t, p: kdf.p, i: kdf.i, hash: kdf.hash }, s: bytesToB64u(s), ct: bytesToB64u(await aesEncrypt(key, keyBytes)) };
+    return { k: c.k, kd: { algo: kdf.algo, m: kdf.m, t: kdf.t, p: kdf.p, i: kdf.i, hash: kdf.hash }, s: bytesToB64u(s), ct: bytesToB64u(await aesEncryptNoIv(key, keyBytes)) };
   }
   if (c.k === 'prf') {
     const s = randomBytes(32);
@@ -325,13 +343,14 @@ async function wrapCredential(c, keyBytes, kdf) {
       alg: 'hybrid-x25519-mlkem768',
       x: bytesToB64u(ephPub),
       m: bytesToB64u(ctKem),
-      ct: bytesToB64u(await aesEncrypt(key, keyBytes)),
+      ct: bytesToB64u(await aesEncryptNoIv(key, keyBytes)),
     };
   }
   throw new SealError(`unknown credential kind: ${c.k}`);
 }
 
-async function tryUnwrap(w, creds) {
+async function tryUnwrap(w, creds, noIv) {
+  const decrypt = noIv ? aesDecryptNoIv : aesDecrypt;
   try {
     let bytes = null;
     if (w.k === 'pass' || w.k === 'embed') {
@@ -344,7 +363,7 @@ async function tryUnwrap(w, creds) {
         if (pw == null) continue;
         try {
           const key = await deriveKey({ ...w.kd, s: w.s }, pw);
-          bytes = await aesDecrypt(key, b64uToBytes(w.ct));
+          bytes = await decrypt(key, b64uToBytes(w.ct));
           break;
         } catch {
           /* wrong candidate, try the next */
@@ -365,9 +384,39 @@ async function tryUnwrap(w, creds) {
       const ssM = new Uint8Array(await ml_kem768.decapsulate(b64uToBytes(w.m), mlkemPriv));
       const combined = await sha256(concatBytes(toBytes('x25519'), ssX, toBytes('mlkem768'), ssM));
       const key = await importAesKey(combined);
-      bytes = await aesDecrypt(key, b64uToBytes(w.ct));
+      bytes = await decrypt(key, b64uToBytes(w.ct));
     }
     return bytes ? { x: w.xi ?? 0, bytes } : null;
+  } catch {
+    return null;
+  }
+}
+
+// Direct mode: derive the payload key straight from the single credential.
+async function deriveDirectKey(w, creds) {
+  try {
+    if (w.k === 'pass' || w.k === 'embed') {
+      const pw = w.k === 'embed' ? creds.embeddedPassword : creds.password;
+      if (pw == null) return null;
+      return await deriveKey({ ...w.kd, s: w.s }, pw);
+    }
+    if (w.k === 'prf') {
+      const first = await (creds.prfAssertion ? creds.prfAssertion(w) : assertPasskey(w));
+      if (!first) return null;
+      return importAesKey(first);
+    }
+    if (w.k === 'pub') {
+      if (!creds.privateKeys) return null;
+      const { x25519Key, mlkemPriv } = await normalizePrivate(creds.privateKeys);
+      const ssX = new Uint8Array(
+        await crypto.subtle.deriveBits({ name: 'X25519', public: await importX25519Public(b64uToBytes(w.x)) }, x25519Key, 256)
+      );
+      const { ml_kem768 } = await import('@noble/post-quantum/ml-kem.js');
+      const ssM = new Uint8Array(await ml_kem768.decapsulate(b64uToBytes(w.m), mlkemPriv));
+      const combined = await sha256(concatBytes(toBytes('x25519'), ssX, toBytes('mlkem768'), ssM));
+      return importAesKey(combined);
+    }
+    return null;
   } catch {
     return null;
   }
@@ -607,6 +656,56 @@ export async function seal(opts = {}) {
   if (timeLock) meta.time = { salt: timeLock.saltB64 ?? bytesToB64u(timeLock.salt), n: timeLock.n };
 
   const env = { v: VERSION, t: type, meta, wrap: [], payload: {} };
+
+  // Direct mode: exactly one unlock method and no threshold/time-lock — the
+  // payload is encrypted directly under that method's key. No wrap layer,
+  // no random payload key: the smallest possible encrypted link.
+  const direct = creds.length === 1 && threshold == null && timeLock == null;
+  if (direct) {
+    const c = creds[0];
+    let key;
+    if (c.k === 'pass' || c.k === 'embed') {
+      const s = randomBytes(16);
+      key = await deriveKey({ ...kdf, s: bytesToB64u(s) }, c.password);
+      env.wrap.push({
+        k: c.k,
+        direct: true,
+        kd: { algo: kdf.algo, m: kdf.m, t: kdf.t, p: kdf.p, i: kdf.i, hash: kdf.hash },
+        s: bytesToB64u(s),
+      });
+    } else if (c.k === 'prf') {
+      const s = randomBytes(32);
+      const { first, credentialId } = await enrollPasskey(s);
+      key = await importAesKey(first);
+      env.wrap.push({ k: 'prf', direct: true, cid: bytesToB64u(credentialId), s: bytesToB64u(s) });
+    } else if (c.k === 'pub') {
+      const { x25519Pub, mlkemPub } = normalizeRecipient(c.recipient);
+      const eph = await crypto.subtle.generateKey({ name: 'X25519' }, true, ['deriveBits']);
+      const ephPub = new Uint8Array(await crypto.subtle.exportKey('raw', eph.publicKey));
+      const ssX = new Uint8Array(
+        await crypto.subtle.deriveBits(
+          { name: 'X25519', public: await importX25519Public(b64uToBytes(x25519Pub)) },
+          eph.privateKey,
+          256
+        )
+      );
+      const { ml_kem768 } = await import('@noble/post-quantum/ml-kem.js');
+      const enc = await ml_kem768.encapsulate(b64uToBytes(mlkemPub));
+      const combined = await sha256(concatBytes(toBytes('x25519'), ssX, toBytes('mlkem768'), new Uint8Array(enc.sharedSecret)));
+      key = await importAesKey(combined);
+      env.wrap.push({
+        k: 'pub',
+        direct: true,
+        alg: 'hybrid-x25519-mlkem768',
+        x: bytesToB64u(ephPub),
+        m: bytesToB64u(new Uint8Array(enc.cipherText)),
+      });
+    }
+    env.payload = { ct: bytesToB64u(await aesEncryptNoIv(key, toBytes(String(data)))) };
+    if (signer) await signEnvelope(env, signer, { pq });
+    return env;
+  }
+
   if (threshold != null) {
     const m = Number(threshold);
     if (!Number.isInteger(m) || m < 1 || m > creds.length) {
@@ -635,7 +734,7 @@ export async function seal(opts = {}) {
   if (meta.time) payloadKey = await hashChain(K, b64uToBytes(meta.time.salt), meta.time.n);
 
   const key = await importAesKey(payloadKey);
-  env.payload = { ct: bytesToB64u(await aesEncrypt(key, toBytes(String(data)))) };
+  env.payload = { ct: bytesToB64u(await aesEncryptNoIv(key, toBytes(String(data)))) };
   if (signer) await signEnvelope(env, signer, { pq });
   return env;
 }
@@ -646,13 +745,23 @@ export async function seal(opts = {}) {
 // Returns { type, data, meta, env }. Throws SealError with a friendly message.
 export async function open(str, creds = {}) {
   const env = await decodeEnvelope(str);
+  const noIv = env.v >= COMPACT_VERSION;
+
+  // Direct mode fast path: single method, payload encrypted under its key.
+  if (!env.thr && env.wrap?.length === 1 && env.wrap[0].direct) {
+    const key = await deriveDirectKey(env.wrap[0], creds);
+    if (!key) throw new SealError('None of the provided credentials unlocked this link');
+    const data = toStr(await aesDecryptNoIv(key, b64uToBytes(env.payload.ct)));
+    return { type: env.t, data, meta: env.meta, env };
+  }
+
   const fragments = [];
   if (env.thr) {
     // One credential may satisfy several wrappers that share it; each share
     // (xi) may only count once toward the threshold.
     const seen = new Set();
     for (const w of env.wrap) {
-      const f = await tryUnwrap(w, creds);
+      const f = await tryUnwrap(w, creds, noIv);
       if (f && !seen.has(f.x)) {
         seen.add(f.x);
         fragments.push(f);
@@ -660,7 +769,7 @@ export async function open(str, creds = {}) {
     }
   } else {
     for (const w of env.wrap) {
-      const f = await tryUnwrap(w, creds);
+      const f = await tryUnwrap(w, creds, noIv);
       if (f) {
         fragments.push(f);
         break; // any single wrapper yields the full key
@@ -686,7 +795,7 @@ export async function open(str, creds = {}) {
   if (env.meta?.time) K = await hashChain(K, b64uToBytes(env.meta.time.salt), env.meta.time.n);
 
   const key = await importAesKey(K);
-  const data = toStr(await aesDecrypt(key, b64uToBytes(env.payload.ct)));
+  const data = toStr(await (noIv ? aesDecryptNoIv(key, b64uToBytes(env.payload.ct)) : aesDecrypt(key, b64uToBytes(env.payload.ct))));
   return { type: env.t, data, meta: env.meta, env };
 }
 
