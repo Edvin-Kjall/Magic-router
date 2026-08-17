@@ -1287,7 +1287,55 @@ const EXTENDED = [
   "whats-new",
   "learn-more",
   "free-trial",
-  "book-a-demo"
+  "book-a-demo",
+  "productId",
+  "categoryId",
+  "itemId",
+  "orderId",
+  "userId",
+  "sessionId",
+  "cartId",
+  "storeId",
+  "brandId",
+  "colorId",
+  "sizeId",
+  "styleId",
+  "articleId",
+  "productCode",
+  "articleNumber",
+  "catalogId",
+  "langId",
+  "siteId",
+  "pageId",
+  "variantId",
+  "skuId",
+  "quantity",
+  "productName",
+  "pageSize",
+  "sortBy",
+  "filterBy",
+  "countryCode",
+  "currencyCode",
+  "/sv_se",
+  "/en_us",
+  "/en_gb",
+  "/en_au",
+  "/en_ca",
+  "/de_de",
+  "/fr_fr",
+  "/es_es",
+  "/it_it",
+  "/nl_nl",
+  "/pt_br",
+  "/ja_jp",
+  "/zh_cn",
+  "/ko_kr",
+  "/ru_ru",
+  "/tr_tr",
+  "/pl_pl",
+  "/da_dk",
+  "/fi_fi",
+  "/nb_no"
 ];
 
 function buildTrie() {
@@ -1330,22 +1378,34 @@ function trieMatch(bytes, i) {
   return { match, matchLen };
 }
 
-// longest extended (full-domain) match at bytes[i]
-function extMatch(bytes, i) {
-  const bucket = EXT_BY_FIRST[bytes[i] & 0xff];
-  if (!bucket) return { len: 0, idx: -1 };
-  let len = 0;
-  let idx = -1;
-  for (const t of bucket) {
-    const s = EXTENDED[t];
-    if (s.length <= len || i + s.length > bytes.length) continue;
-    let ok = true;
-    for (let k = 0; k < s.length; k++) {
-      if ((s.charCodeAt(k) & 0xff) !== bytes[i + k]) { ok = false; break; }
-    }
-    if (ok) { len = s.length; idx = t; }
+// ALL core-token matches at bytes[i] (for the optimal DP tokenizer)
+function trieMatches(bytes, i) {
+  const out = [];
+  let node = TRIE;
+  for (let j = i; j < bytes.length; j++) {
+    node = node[bytes[j] & 0xff];
+    if (!node) break;
+    if (node.end !== undefined) out.push({ len: j - i + 1, idx: node.end });
   }
-  return { len, idx };
+  return out;
+}
+
+// ALL extended-token matches at bytes[i]
+function extMatchesAll(bytes, i) {
+  const out = [];
+  const bucket = EXT_BY_FIRST[bytes[i] & 0xff];
+  if (bucket) {
+    for (const t of bucket) {
+      const s = EXTENDED[t];
+      if (i + s.length > bytes.length) continue;
+      let ok = true;
+      for (let k = 0; k < s.length; k++) {
+        if ((s.charCodeAt(k) & 0xff) !== bytes[i + k]) { ok = false; break; }
+      }
+      if (ok) out.push({ len: s.length, idx: t });
+    }
+  }
+  return out;
 }
 
 // v1 (legacy) compressor: core tokens + 0xFF <byte> literal escapes.
@@ -1365,49 +1425,78 @@ export function dictCompress(bytes) {
   return new Uint8Array(out);
 }
 
-// v2/v3 compressor: adds 3-byte extended tokens when they beat the core,
-// plus literal runs for long unknown words. Returns the stream tier:
+// Optimal (dynamic-programming) tokenizer shared by the shallow and deep
+// compressors. Greedy longest-match is provably suboptimal when a short
+// token shadows a longer one one byte later (e.g. ".cloud" hiding the
+// "cloudflare" label). Options per position: core token (1 B), ext token
+// (3 B), literal (2 B), literal run of L>=3 (L+2 B).
+function tokenizeDP(bytes, matchSrc) {
+  const n = bytes.length;
+  const dp = new Float64Array(n + 1);
+  const kind = new Int8Array(n);   // 0 literal · 1 core · 2 ext · 3 run
+  const ref = new Int32Array(n);   // token index / run length
+  const len = new Int16Array(n);   // consumed bytes
+  for (let i = n - 1; i >= 0; i--) {
+    let best = 2 + dp[i + 1];
+    let bk = 0;
+    let br = 0;
+    let bl = 1;
+    for (const m of trieMatches(bytes, i)) {
+      const c = 1 + dp[i + m.len];
+      if (c < best) { best = c; bk = 1; br = m.idx; bl = m.len; }
+    }
+    for (const src of matchSrc) {
+      for (const m of src.matches(bytes, i)) {
+        const c = src.cost + dp[i + m.len];
+        if (c < best) { best = c; bk = 2; br = src.offset + m.idx; bl = m.len; }
+      }
+    }
+    const maxL = Math.min(255, n - i);
+    for (let L = 3; L <= maxL; L++) {
+      const c = L + 2 + dp[i + L];
+      if (c < best) { best = c; bk = 3; br = L; bl = L; }
+    }
+    dp[i] = best;
+    kind[i] = bk;
+    ref[i] = br;
+    len[i] = bl;
+  }
+  return { kind, ref, len, n };
+}
+
+// v2/v3 compressor: extended tokens + literal runs, optimally tokenized.
+// Returns the stream tier:
 //   'legacy' — core tokens + 0xFF <byte> escapes (payload flags 1/2)
 //   'v2'     — extended tokens or high-byte literals (payload flags 3/4)
 //   'v3'     — literal runs used (payload flags 5/6, u1 bit4+5+6)
 export function dictCompressEx(bytes) {
+  const n = bytes.length;
+  if (n === 0) return { bytes: new Uint8Array(0), tier: 'legacy' };
+  const { kind, ref, len } = tokenizeDP(bytes, [{ matches: extMatchesAll, cost: 3, offset: 0 }]);
   const out = [];
-  let i = 0;
   let usedV2 = false;
   let usedRun = false;
-  while (i < bytes.length) {
-    const { match, matchLen } = trieMatch(bytes, i);
-    const e = extMatch(bytes, i);
-    if (match !== -1 && (e.len === 0 || matchLen * 3 >= e.len)) {
-      out.push(match);
-      i += matchLen;
-    } else if (e.len > 0) {
-      out.push(ESC, 0x80 | (e.idx >> 8), e.idx & 0xff);
+  let i = 0;
+  while (i < n) {
+    const k = kind[i];
+    if (k === 0) {
+      const b = bytes[i];
+      if (b === 0 || b >= 0x80) { out.push(ESC, 0, b); usedV2 = true; }
+      else out.push(ESC, b);
+      i++;
+    } else if (k === 1) {
+      out.push(ref[i]);
+      i += len[i];
+    } else if (k === 2) {
+      out.push(ESC, 0x80 | (ref[i] >> 8), ref[i] & 0xff);
       usedV2 = true;
-      i += e.len;
+      i += len[i];
     } else {
-      // maximal run of bytes with no token match at any position
-      let run = 0;
-      while (i + run < bytes.length &&
-             trieMatch(bytes, i + run).match === -1 &&
-             extMatch(bytes, i + run).len === 0) run++;
-      if (run >= 3) {
-        while (run > 0) {
-          const n = Math.min(run, 255);
-          out.push(ESC, 0, n);
-          for (let k = 0; k < n; k++) out.push(bytes[i + k]);
-          i += n;
-          run -= n;
-        }
-        usedRun = true;
-      } else {
-        for (let k = 0; k < run; k++) {
-          const b = bytes[i];
-          if (b === 0 || b >= 0x80) { out.push(ESC, 0, b); usedV2 = true; }
-          else out.push(ESC, b);
-          i++;
-        }
-      }
+      const L = len[i];
+      out.push(ESC, 0, L);
+      for (let k2 = 0; k2 < L; k2++) out.push(bytes[i + k2]);
+      usedRun = true;
+      i += L;
     }
   }
   const tier = usedRun ? 'v3' : usedV2 ? 'v2' : 'legacy';
@@ -1489,23 +1578,36 @@ export function dictDecompressV3(bytes) {
 }
 
 // =============================================================== deep dict
-// Downloadable dictionary (deep-v1.json.gz at the site root). Fetched once,
-// cached (Cache API in browsers), and used by payload flags 7/8 (encrypted)
-// and the u2. plain-link prefix. Deep tokens are 3 bytes:
-// 0xFF (0x80|hi) lo, indexing this table; core tokens and v3 runs still
-// apply. The table is frozen per version — deep-v2 will be a new file.
+// Downloadable dictionaries (deep-v1.json.gz / deep-v2.json.gz at the site
+// root). deep-v1 is FROZEN: older u2. links and payload flags 7/8 decode
+// against it forever. deep-v2 is the current table, used by u3. links and
+// payload flags 9/10. Each is fetched once and cached (Cache API in
+// browsers). Deep tokens are 3 bytes: 0xFF (0x80|hi) lo, indexing the
+// active table; the 1280 hottest entries also get 2-byte codes 250-254.
 
-let DEEP = null;
+let DEEP = null;        // current table (deep-v2)
+let DEEP_V1 = null;     // frozen table (deep-v1)
 let DEEP_BY_FIRST = null;
 let deepPromise = null;
+let deepV1Promise = null;
+
+function buildBuckets(arr) {
+  const b = [];
+  for (let i = 0; i < arr.length; i++) {
+    const c = String(arr[i]).charCodeAt(0) & 0xff;
+    (b[c] ?? (b[c] = [])).push(i);
+  }
+  return b;
+}
 
 export function setDeepTokens(arr) {
   DEEP = arr;
-  DEEP_BY_FIRST = [];
-  for (let i = 0; i < arr.length; i++) {
-    const c = String(arr[i]).charCodeAt(0) & 0xff;
-    (DEEP_BY_FIRST[c] ?? (DEEP_BY_FIRST[c] = [])).push(i);
-  }
+  DEEP_BY_FIRST = buildBuckets(arr);
+  return arr;
+}
+
+export function setDeepTokensV1(arr) {
+  DEEP_V1 = arr;
   return arr;
 }
 
@@ -1513,12 +1615,12 @@ export function hasDeep() {
   return DEEP !== null;
 }
 
-async function fetchDeepBytes() {
+async function fetchDeepBytes(name) {
   // browser: Cache API around the same-origin asset
   if (typeof caches !== 'undefined') {
     try {
-      const cache = await caches.open('mr-deep-dict-v1');
-      const url = new URL('deep-v1.json.gz', globalThis.location.href).href;
+      const cache = await caches.open('mr-deep-dict-' + name);
+      const url = new URL(name, globalThis.location.href).href;
       let res = await cache.match(url);
       if (!res) {
         res = await fetch(url);
@@ -1531,7 +1633,7 @@ async function fetchDeepBytes() {
     }
   }
   if (typeof location !== 'undefined' && location.href) {
-    const res = await fetch(new URL('deep-v1.json.gz', location.href).href);
+    const res = await fetch(new URL(name, location.href).href);
     if (!res.ok) throw new Error('deep dictionary fetch failed');
     return new Uint8Array(await res.arrayBuffer());
   }
@@ -1539,7 +1641,7 @@ async function fetchDeepBytes() {
   try {
     const { readFileSync } = await import('node:fs');
     const { fileURLToPath } = await import('node:url');
-    const p = fileURLToPath(new URL('../deep-v1.json.gz', import.meta.url));
+    const p = fileURLToPath(new URL('../' + name, import.meta.url));
     return new Uint8Array(readFileSync(p));
   } catch {
     /* fall through */
@@ -1563,15 +1665,16 @@ async function gunzipMaybe(bytes) {
   return bytes;
 }
 
+async function loadDeep(name) {
+  const bytes = await fetchDeepBytes(name);
+  const raw = await gunzipMaybe(bytes);
+  return JSON.parse(new TextDecoder().decode(raw));
+}
+
 export async function ensureDeepDict() {
   if (DEEP) return DEEP;
   if (deepPromise) return deepPromise;
-  deepPromise = (async () => {
-    const bytes = await fetchDeepBytes();
-    const raw = await gunzipMaybe(bytes);
-    setDeepTokens(JSON.parse(new TextDecoder().decode(raw)));
-    return DEEP;
-  })();
+  deepPromise = loadDeep('deep-v2.json.gz').then(setDeepTokens);
   try {
     return await deepPromise;
   } catch (err) {
@@ -1580,96 +1683,93 @@ export async function ensureDeepDict() {
   }
 }
 
-// longest hot-token match at bytes[i] (deep table prefix, 2-byte codes)
-const HOT_LIMIT = 5 * 256;
-function hotMatch(bytes, i) {
-  if (!DEEP_BY_FIRST) return { len: 0, idx: -1 };
-  const bucket = DEEP_BY_FIRST[bytes[i] & 0xff];
-  if (!bucket) return { len: 0, idx: -1 };
-  let len = 0;
-  let idx = -1;
-  for (const t of bucket) {
-    if (t >= HOT_LIMIT) continue;
-    const s = String(DEEP[t]);
-    if (s.length <= len || i + s.length > bytes.length) continue;
-    let ok = true;
-    for (let k = 0; k < s.length; k++) {
-      if ((s.charCodeAt(k) & 0xff) !== bytes[i + k]) { ok = false; break; }
-    }
-    if (ok) { len = s.length; idx = t; }
+export async function ensureDeepDictV1() {
+  if (DEEP_V1) return DEEP_V1;
+  if (deepV1Promise) return deepV1Promise;
+  deepV1Promise = loadDeep('deep-v1.json.gz').then(setDeepTokensV1);
+  try {
+    return await deepV1Promise;
+  } catch (err) {
+    deepV1Promise = null;
+    throw err;
   }
-  return { len, idx };
 }
 
-// longest deep-token match at bytes[i]
-function deepMatch(bytes, i) {
-  if (!DEEP_BY_FIRST) return { len: 0, idx: -1 };
-  const bucket = DEEP_BY_FIRST[bytes[i] & 0xff];
-  if (!bucket) return { len: 0, idx: -1 };
-  let len = 0;
-  let idx = -1;
-  for (const t of bucket) {
-    const s = String(DEEP[t]);
-    if (s.length <= len || i + s.length > bytes.length) continue;
-    let ok = true;
-    for (let k = 0; k < s.length; k++) {
-      if ((s.charCodeAt(k) & 0xff) !== bytes[i + k]) { ok = false; break; }
+// ALL hot-token matches at bytes[i] (deep table prefix, 2-byte codes)
+const HOT_LIMIT = 5 * 256;
+function hotMatchesAll(bytes, i) {
+  const out = [];
+  const bucket = DEEP_BY_FIRST?.[bytes[i] & 0xff];
+  if (bucket) {
+    for (const t of bucket) {
+      if (t >= HOT_LIMIT) continue;
+      const s = String(DEEP[t]);
+      if (i + s.length > bytes.length) continue;
+      let ok = true;
+      for (let k = 0; k < s.length; k++) {
+        if ((s.charCodeAt(k) & 0xff) !== bytes[i + k]) { ok = false; break; }
+      }
+      if (ok) out.push({ len: s.length, idx: t });
     }
-    if (ok) { len = s.length; idx = t; }
   }
-  return { len, idx };
+  return out;
+}
+
+// ALL deep-token matches at bytes[i]
+function deepMatchesAll(bytes, i) {
+  const out = [];
+  const bucket = DEEP_BY_FIRST?.[bytes[i] & 0xff];
+  if (bucket) {
+    for (const t of bucket) {
+      const s = String(DEEP[t]);
+      if (i + s.length > bytes.length) continue;
+      let ok = true;
+      for (let k = 0; k < s.length; k++) {
+        if ((s.charCodeAt(k) & 0xff) !== bytes[i + k]) { ok = false; break; }
+      }
+      if (ok) out.push({ len: s.length, idx: t });
+    }
+  }
+  return out;
 }
 
 // deep compressor: core tokens (1 B) + hot tokens (2 B, deep idx < 1280)
-// + deep tokens (3 B) + v3 literal runs
+// + deep tokens (3 B) + literal runs — optimally tokenized via DP
 export function dictCompressDeep(bytes) {
+  const n = bytes.length;
+  if (n === 0) return { bytes: new Uint8Array(0), usedDeep: false };
+  const { kind, ref, len } = tokenizeDP(bytes, [
+    { matches: hotMatchesAll, cost: 2, offset: 0 },
+    { matches: deepMatchesAll, cost: 3, offset: 1 << 20 },
+  ]);
   const out = [];
-  let i = 0;
   let usedDeep = false;
-  while (i < bytes.length) {
-    const { match, matchLen } = trieMatch(bytes, i);
-    const h = hotMatch(bytes, i);
-    const d = deepMatch(bytes, i);
-    const cands = [];
-    if (match !== -1) cands.push({ cost: 1, len: matchLen, code: match, idx: -1 });
-    if (h.len > 0) cands.push({ cost: 2, len: h.len, code: 250 + (h.idx >> 8), idx: h.idx });
-    if (d.len > 0) cands.push({ cost: 3, len: d.len, code: 0xff, idx: d.idx });
-    let best = null;
-    for (const c of cands) {
-      if (!best || c.cost * best.len < best.cost * c.len) best = c;
-    }
-    if (best) {
-      if (best.cost === 1) {
-        out.push(best.code);
-      } else if (best.cost === 2) {
-        out.push(best.code, best.idx & 0xff);
-        usedDeep = true;
+  let i = 0;
+  while (i < n) {
+    const k = kind[i];
+    if (k === 0) {
+      const b = bytes[i];
+      if (b === 0 || b >= 0x80) out.push(ESC, 0, b);
+      else out.push(ESC, b);
+      i++;
+    } else if (k === 1) {
+      out.push(ref[i]);
+      i += len[i];
+    } else if (k === 2) {
+      const idx = ref[i];
+      if (idx >= (1 << 20)) {
+        const didx = idx - (1 << 20);
+        out.push(ESC, 0x80 | (didx >> 8), didx & 0xff);
       } else {
-        out.push(ESC, 0x80 | (best.idx >> 8), best.idx & 0xff);
-        usedDeep = true;
+        out.push(250 + (idx >> 8), idx & 0xff);
       }
-      i += best.len;
-      continue;
-    }
-    let run = 0;
-    while (i + run < bytes.length &&
-           trieMatch(bytes, i + run).match === -1 &&
-           deepMatch(bytes, i + run).len === 0) run++;
-    if (run >= 3) {
-      while (run > 0) {
-        const n = Math.min(run, 255);
-        out.push(ESC, 0, n);
-        for (let k = 0; k < n; k++) out.push(bytes[i + k]);
-        i += n;
-        run -= n;
-      }
+      usedDeep = true;
+      i += len[i];
     } else {
-      for (let k = 0; k < run; k++) {
-        const b = bytes[i];
-        if (b === 0 || b >= 0x80) out.push(ESC, 0, b);
-        else out.push(ESC, b);
-        i++;
-      }
+      const L = len[i];
+      out.push(ESC, 0, L);
+      for (let k2 = 0; k2 < L; k2++) out.push(bytes[i + k2]);
+      i += L;
     }
   }
   return { bytes: new Uint8Array(out), usedDeep };
@@ -1699,6 +1799,40 @@ export function dictDecompressDeep(bytes) {
       const idx = (b - 250) * 256 + (bytes[++i] ?? 0);
       const s = DEEP?.[idx];
       if (s === undefined) throw new Error(`unknown hot token ${idx}`);
+      for (let k = 0; k < s.length; k++) out.push(s.charCodeAt(k) & 0xff);
+    } else {
+      const tok = TOKENS[b];
+      if (tok === undefined) throw new Error(`unknown dictionary token ${b}`);
+      for (let k = 0; k < tok.length; k++) out.push(tok.charCodeAt(k) & 0xff);
+    }
+  }
+  return new Uint8Array(out);
+}
+
+// deep-v1 decoder (payload flags 7/8, u2. links): identical grammar to
+// dictDecompressDeep but indexes the frozen DEEP_V1 table instead.
+export function dictDecompressDeepV1(bytes) {
+  const out = [];
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if (b === ESC) {
+      const n = bytes[++i];
+      if (n === undefined) { out.push(0); break; }
+      if (n >= 0x80) {
+        const idx = ((n & 0x7f) << 8) | (bytes[++i] ?? 0);
+        const s = DEEP_V1?.[idx];
+        if (s === undefined) throw new Error(`unknown deep-v1 token ${idx}`);
+        for (let k = 0; k < s.length; k++) out.push(s.charCodeAt(k) & 0xff);
+      } else if (n === 0) {
+        const len = bytes[++i] ?? 0;
+        for (let k = 0; k < len; k++) out.push(bytes[++i] ?? 0);
+      } else {
+        out.push(n);
+      }
+    } else if (b >= 250) {
+      const idx = (b - 250) * 256 + (bytes[++i] ?? 0);
+      const s = DEEP_V1?.[idx];
+      if (s === undefined) throw new Error(`unknown deep-v1 hot token ${idx}`);
       for (let k = 0; k < s.length; k++) out.push(s.charCodeAt(k) & 0xff);
     } else {
       const tok = TOKENS[b];

@@ -26,7 +26,7 @@ import { deriveKey, ARGON2ID } from './kd.js';
 import { aesEncrypt, aesDecrypt, aesEncryptNoIv, aesDecryptNoIv, importAesKey } from './aes.js';
 import { splitSecret, combineShares } from './shamir.js';
 import { hashChain } from './timelock.js';
-import { dictCompressEx, dictDecompress, dictDecompressLegacy, dictDecompressV3, dictCompressDeep, dictDecompressDeep, ensureDeepDict, hasDeep } from './dict.js';
+import { dictCompressEx, dictDecompress, dictDecompressLegacy, dictDecompressV3, dictCompressDeep, dictDecompressDeep, dictDecompressDeepV1, ensureDeepDict, ensureDeepDictV1, hasDeep } from './dict.js';
 
 export const PREFIX = 's3.';
 export const COMPACT_PREFIX = 's5.';
@@ -68,7 +68,7 @@ async function preparePayload(type, data) {
   if (d.length < best.length) { best = d; bestTier = tier; }
   if (bestTier === 'raw') return concatBytes(new Uint8Array([0]), raw);
   const { flag, bytes } = await deflateMaybe(best);
-  const f = bestTier === 'deep' ? (flag ? 7 : 8)
+  const f = bestTier === 'deep' ? (flag ? 9 : 10)
     : bestTier === 'v3' ? (flag ? 5 : 6)
     : bestTier === 'v2' ? (flag ? 3 : 4)
     : (flag ? 1 : 2);
@@ -86,10 +86,18 @@ async function restorePayload(type, bytes) {
   if (f === 5) return dictDecompressV3(await inflateMaybe(1, bytes.subarray(1)));
   if (f === 6) return dictDecompressV3(bytes.subarray(1));
   if (f === 7) {
+    await ensureDeepDictV1();
+    return dictDecompressDeepV1(await inflateMaybe(1, bytes.subarray(1)));
+  }
+  if (f === 8) {
+    await ensureDeepDictV1();
+    return dictDecompressDeepV1(bytes.subarray(1));
+  }
+  if (f === 9) {
     await ensureDeepDict();
     return dictDecompressDeep(await inflateMaybe(1, bytes.subarray(1)));
   }
-  if (f === 8) {
+  if (f === 10) {
     await ensureDeepDict();
     return dictDecompressDeep(bytes.subarray(1));
   }
@@ -179,12 +187,14 @@ async function inflateIfPossible(bytes) {
 // Unencrypted short links: u1.<base64url( FLAG || maybe-deflate( URL ) )>.
 // No crypto, no storage — just compression. Anyone holding the link can
 // decode the destination, which is exactly what "no encryption" means.
-// u2. is the same format with the downloadable deep dictionary (bit7).
+// u2. is the same format with the downloadable deep dictionary v1 (bit7);
+// u3. with deep dictionary v2 (the current table).
 export const PLAIN_PREFIX = 'u1.';
 export const PLAIN_PREFIX_DEEP = 'u2.';
+export const PLAIN_PREFIX_DEEP2 = 'u3.';
 
 export function isPlainLink(s) {
-  return typeof s === 'string' && (s.startsWith(PLAIN_PREFIX) || s.startsWith(PLAIN_PREFIX_DEEP));
+  return typeof s === 'string' && (s.startsWith(PLAIN_PREFIX) || s.startsWith(PLAIN_PREFIX_DEEP) || s.startsWith(PLAIN_PREFIX_DEEP2));
 }
 
 export async function encodePlainUrl(url) {
@@ -222,7 +232,7 @@ export async function encodePlainUrl(url) {
   }
   const { flag, bytes } = await deflateMaybe(body);
   const outFlags = flags | flag;
-  const prefix = tier === 'deep' ? PLAIN_PREFIX_DEEP : PLAIN_PREFIX;
+  const prefix = tier === 'deep' ? PLAIN_PREFIX_DEEP2 : PLAIN_PREFIX;
   const link = prefix + bytesToB64u(concatBytes(new Uint8Array([outFlags]), bytes));
   // Hard invariant: a "short" link is never longer than the URL it points
   // to. When compression can't win, hand back the URL itself — it IS the
@@ -231,10 +241,13 @@ export async function encodePlainUrl(url) {
 }
 
 export async function decodePlainUrl(str) {
-  let deep = false;
-  if (str.startsWith(PLAIN_PREFIX_DEEP)) {
+  let deep = 0;
+  if (str.startsWith(PLAIN_PREFIX_DEEP2)) {
+    str = str.slice(PLAIN_PREFIX_DEEP2.length);
+    deep = 2;
+  } else if (str.startsWith(PLAIN_PREFIX_DEEP)) {
     str = str.slice(PLAIN_PREFIX_DEEP.length);
-    deep = true;
+    deep = 1;
   } else if (str.startsWith(PLAIN_PREFIX)) {
     str = str.slice(PLAIN_PREFIX.length);
   }
@@ -243,7 +256,10 @@ export async function decodePlainUrl(str) {
   const scheme = (flags >> 1) & 3;
   let bytes = await inflateMaybe(flags & 1, raw.subarray(1));
   if (flags & 16) {
-    if (deep || flags & 128) {
+    if (deep === 1 || (deep === 0 && flags & 128)) {
+      await ensureDeepDictV1();
+      bytes = dictDecompressDeepV1(bytes);
+    } else if (deep === 2) {
       await ensureDeepDict();
       bytes = dictDecompressDeep(bytes);
     } else if (flags & 64) {

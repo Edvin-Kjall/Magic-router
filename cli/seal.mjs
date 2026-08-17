@@ -36,17 +36,21 @@ import {
 } from '../site/public/lib/envelope.js';
 import { estimateHashRate, formatDuration } from '../site/public/lib/timelock.js';
 import { toString as qrTerminal } from 'qrcode';
-import { setDeepTokens } from '../site/public/lib/dict.js';
+import { setDeepTokens, setDeepTokensV1 } from '../site/public/lib/dict.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-// Load the deep dictionary (same one the page downloads) so CLI links are
-// just as small. Missing file = shallow dictionary only.
+// Load the deep dictionaries (same ones the page downloads) so CLI links
+// are just as small and old u2. links still open. Missing files = shallow.
 try {
-  const deep = JSON.parse(readFileSync(join(here, '..', 'site', 'public', 'deep-v1.json'), 'utf8'));
-  setDeepTokens(deep);
+  setDeepTokens(JSON.parse(readFileSync(join(here, '..', 'site', 'public', 'deep-v2.json'), 'utf8')));
 } catch {
   /* shallow dictionary only */
+}
+try {
+  setDeepTokensV1(JSON.parse(readFileSync(join(here, '..', 'site', 'public', 'deep-v1.json'), 'utf8')));
+} catch {
+  /* no legacy deep dictionary */
 }
 
 const HELP = `

@@ -324,25 +324,50 @@ test('locale and word tokens shrink the cloudflare registrar link', async () => 
 });
 
 test('deep dictionary shrinks links far below the shallow dict', async () => {
-  // Node loads deep-v1.json.gz from the repo next to dict.js — no network.
+  // Node loads deep-v2.json.gz from the repo next to dict.js — no network.
   const { ensureDeepDict } = await import('../site/public/lib/dict.js');
   await ensureDeepDict();
   const { encodePlainUrl, decodePlainUrl } = await import('../site/public/lib/envelope.js');
   const url = 'https://openrouter.ai/deepseek/deepseek-v4-flash-0731';
   const link = await encodePlainUrl(url);
-  assert.ok(link.startsWith('u2.'), `deep link should use the u2 prefix, got ${link}`);
+  assert.ok(link.startsWith('u3.'), `deep link should use the u3 prefix, got ${link}`);
   assert.ok(link.length < 36, `deep link should be tiny, got ${link.length}: ${link}`);
   assert.equal(await decodePlainUrl(link), url);
+  // cloudflare docs URL: greedy tokenization used to fail on ".cloud" vs
+  // "cloudflare"; the DP tokenizer + developer/domain words shrink it hard
+  const docs = 'https://developers.cloudflare.com/registrar/faq/#domain-restoration';
+  const docsLink = await encodePlainUrl(docs);
+  assert.ok(docsLink.startsWith('u3.'), `docs link should win with u3, got ${docsLink}`);
+  assert.ok(docsLink.length < 30, `docs link should be tiny, got ${docsLink.length}: ${docsLink}`);
+  assert.equal(await decodePlainUrl(docsLink), docs);
   // encrypted deep links round-trip too
   const env = await seal({ type: 'url', data: url, passwords: ['pw'], kdf: KDF });
   const str = await encodeEnvelope(env);
   assert.ok(str.length < 90, `deep sealed link should shrink, got ${str.length}`);
   const r = await open(str, { password: 'pw' });
   assert.equal(r.data, url);
-  // trivial links stay on the shallow tiers (no u2, no dict download needed)
+  // trivial links stay on the shallow tiers (no u3, no dict download needed)
   const plain2 = await encodePlainUrl('https://example.com/api/v1/users?id=42');
   assert.ok(plain2.startsWith('u1.'), `core-covered links stay u1, got ${plain2}`);
   assert.equal(await decodePlainUrl(plain2), 'https://example.com/api/v1/users?id=42');
+});
+
+test('deep-v1 (u2.) links decode against the frozen v1 table', async () => {
+  const { ensureDeepDict, ensureDeepDictV1, setDeepTokens, dictCompressDeep } =
+    await import('../site/public/lib/dict.js');
+  const { decodePlainUrl } = await import('../site/public/lib/envelope.js');
+  const { bytesToB64u } = await import('../site/public/lib/b64.js');
+  const v2 = await ensureDeepDict();
+  const v1 = await ensureDeepDictV1();
+  assert.ok(v1.length > 10000, 'frozen v1 table should be present');
+  const url = 'https://openrouter.ai/deepseek/deepseek-v4-flash-0731';
+  // tokenize with the frozen table, exactly as pages did before the freeze
+  setDeepTokens(v1);
+  const { bytes } = dictCompressDeep(new TextEncoder().encode(url.slice('https://'.length)));
+  setDeepTokens(v2); // restore the current table
+  const link = 'u2.' + bytesToB64u(new Uint8Array([0xf4, ...bytes])); // https + dict bits 4-7
+  assert.ok(link.startsWith('u2.'));
+  assert.equal(await decodePlainUrl(link), url);
 });
 
 test('sealed links with extended-dictionary URLs round-trip', async () => {
