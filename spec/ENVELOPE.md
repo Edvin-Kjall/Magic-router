@@ -1,9 +1,10 @@
-# Magic Router Envelope — format specification, v3
+# Magic Router Envelope — format specification, v3 + v4
 
 A sealed link is a URL fragment (or path segment) of the form:
 
 ```
-s3.<base64url( FLAG || maybe-deflate( JSON ) )>[.<embedded-password>]
+s3.<base64url( FLAG || maybe-deflate( JSON ) )>[.<embedded-password>]   ← v3 (verbose)
+s4.<base64url( FLAG || maybe-deflate( JSON ) )>[.<embedded-password>]   ← v4 (compact)
 ```
 
 - `FLAG` is one byte: `0x01` = the JSON is deflate-raw compressed, `0x00` = raw UTF-8.
@@ -11,8 +12,35 @@ s3.<base64url( FLAG || maybe-deflate( JSON ) )>[.<embedded-password>]
 - The optional `.`-terminated tail after the envelope is the **embedded password**
   (percent-encoded in the full URL). Its presence selects auto-open mode; the envelope
   contains a matching `embed` wrapper.
+- Decoders MUST accept both `s3.` and `s4.`. New links SHOULD be encoded as `s4.`.
 
-The envelope JSON:
+## v4 compact keys
+
+Same semantics as v3, shorter JSON keys (this cuts ~35-40% of link size):
+
+| v3 | v4 | scope |
+|---|---|---|
+| `meta` | `m` | envelope |
+| `wrap` | `w` | envelope |
+| `thr` | `r` | envelope |
+| `payload` | `p` | envelope |
+| `ct` | `c` | payload + wrappers |
+| `host` | `h` | meta |
+| `exp` | `e` | meta |
+| `note` | `n` | meta |
+| `time` | `z` | meta (`s` = salt, `n` = iterations) |
+| `sig` | `g` | meta (`a`=alg, `na`=name, `k`=pk, `s`=sig) |
+| wrapper `k` | `p`/`e`/`r`/`u` | pass / embed / prf / pub |
+| `kd` | `d` | pass/embed — `a` = Argon2id 64MiB/3/1, `f` = Argon2id 8MiB/1/1 (tests), `b` = PBKDF2 (`j` = iterations) |
+| `cid` | `q` | prf |
+| `x` / `m` | `x` / `y` | pub (eph X25519 pk / ML-KEM ciphertext) |
+| share `xi` | `i` | threshold wrappers |
+
+Signature canonicalization is **encoding-independent**: it always uses the v3
+expanded field names with fixed key order and a pinned version field of 3, so
+the same signed link verifies whether it was stored as s3 or s4.
+
+## v3 envelope JSON:
 
 ```jsonc
 {

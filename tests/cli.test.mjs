@@ -24,7 +24,7 @@ async function openCli(link, ...args) {
 
 test('cli: password round trip', async () => {
   const { fragment } = await sealCli('--url', URL_TARGET, '--password', 'cli-pass');
-  assert.ok(fragment.startsWith('s3.'));
+  assert.ok(fragment.startsWith('s4.'));
   const r = await openCli(fragment, '--password', 'cli-pass');
   assert.equal(r.data, URL_TARGET);
   assert.equal(r.type, 'url');

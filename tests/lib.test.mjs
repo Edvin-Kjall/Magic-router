@@ -220,8 +220,20 @@ test('legacy v2 links (argon2id, deflate-compressed) still open', async () => {
 
 test('envelope links stay reasonable in size', async () => {
   // Node has no CompressionStream, so links are uncompressed here; browsers
-  // deflate the envelope and produce much shorter links.
+  // deflate the envelope and produce much shorter links. Compact v4 keeps
+  // even node-built links small.
   const env = await seal({ type: 'url', data: 'https://example.com/a', passwords: ['pw'], kdf: KDF });
   const str = await encodeEnvelope(env);
-  assert.ok(str.length < 500, `link too long: ${str.length}`);
+  assert.ok(str.startsWith('s4.'), 'new links use the compact s4 encoding');
+  assert.ok(str.length < 320, `link too long: ${str.length}`);
+});
+
+test('legacy v3 (s3.) envelopes still encode and decode', async () => {
+  const env = await seal({ type: 'url', data: URL, passwords: ['pw'], kdf: KDF });
+  const s3 = await encodeEnvelope(env, { legacy: true });
+  assert.ok(s3.startsWith('s3.'));
+  const r = await open(s3, { password: 'pw' });
+  assert.equal(r.data, URL);
+  const parsed = await decodeEnvelope(s3);
+  assert.equal(parsed.v, 3);
 });
