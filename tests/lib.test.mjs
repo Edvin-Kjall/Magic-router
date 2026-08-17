@@ -239,7 +239,8 @@ test('plain (unencrypted) short links round-trip and are much shorter', async ()
 });
 
 test('dictionary compression round-trips and helps typical URLs', async () => {
-  const { dictCompress, dictDecompress } = await import('../site/public/lib/dict.js');
+  const { dictCompress, dictDecompressLegacy, TOKENS } = await import('../site/public/lib/dict.js');
+  assert.ok(TOKENS.length <= 255, 'core dictionary stays within the 1-byte code space');
   const compressible = [
     'https://www.inosida.se/nyheter/article?id=42&utm_source=twitter&utm_medium=social',
     'https://example.com/api/v1/users?id=42&search=query&page=2',
@@ -247,15 +248,51 @@ test('dictionary compression round-trips and helps typical URLs', async () => {
   for (const s of compressible) {
     const bytes = new TextEncoder().encode(s);
     const c = dictCompress(bytes);
-    assert.deepEqual(dictDecompress(c), bytes);
+    assert.deepEqual(dictDecompressLegacy(c), bytes);
     assert.ok(c.length < bytes.length, `${s} should compress (${c.length} vs ${bytes.length})`);
   }
   // domain-specific URLs may not compress — they still round-trip exactly,
   // and callers only apply the dictionary when it is actually smaller.
   const plain = new TextEncoder().encode('https://github.com/edvin/magic-router/blob/main/README.md');
-  assert.deepEqual(dictDecompress(dictCompress(plain)), plain);
+  assert.deepEqual(dictDecompressLegacy(dictCompress(plain)), plain);
   const bare = new TextEncoder().encode('zzz-no-tokens-here');
-  assert.deepEqual(dictDecompress(dictCompress(bare)), bare);
+  assert.deepEqual(dictDecompressLegacy(dictCompress(bare)), bare);
+});
+
+test('extended dictionary covers top-1000 domains and stays reversible', async () => {
+  const { dictCompressEx, dictDecompress, dictCompress, dictDecompressLegacy, EXTENDED } =
+    await import('../site/public/lib/dict.js');
+  assert.ok(EXTENDED.length > 500, 'extended table should carry the top-1000 tail');
+  const cases = [
+    ['https://www.tiktok.com/@user/video/1234567890', true],
+    ['https://www.whatsapp.com/channel/abc', true],
+    ['https://dn.se/nyheter/inrikes', true],
+    ['https://www.youtube.com/watch?v=dQw4w9WgXcQ', false], // core tokens already optimal
+    ['https://www.svt.se/nyheter', false], // label + .se = 2 bytes, core wins
+  ];
+  for (const [s, wantExt] of cases) {
+    const bytes = new TextEncoder().encode(s);
+    const { bytes: c, extended } = dictCompressEx(bytes);
+    assert.deepEqual(dictDecompress(c), bytes, `${s} round-trip`);
+    assert.equal(extended, wantExt, `${s} extended flag`);
+    if (extended) assert.ok(c.some((b) => b >= 0x80), `${s} must misdecode loudly on old pages`);
+  }
+  // non-ASCII URLs: v2 escaping, still exact
+  const uni = new TextEncoder().encode('https://a.b/caf\u00e9\u2603?q=1');
+  const { bytes: cu, extended: eu } = dictCompressEx(uni);
+  assert.ok(eu, 'high-byte literals need the v2 decoder');
+  assert.deepEqual(dictDecompress(cu), uni);
+  // legacy pair still round-trips legacy streams with high bytes
+  const leg = dictCompress(new TextEncoder().encode('https://x.y/s\u00e9'));
+  assert.deepEqual(dictDecompressLegacy(leg), new TextEncoder().encode('https://x.y/s\u00e9'));
+});
+
+test('sealed links with extended-dictionary URLs round-trip', async () => {
+  const target = 'https://www.tiktok.com/@user/video/1234567890';
+  const env = await seal({ type: 'url', data: target, passwords: ['pw'], kdf: KDF });
+  const str = await encodeEnvelope(env);
+  const r = await open(str, { password: 'pw' });
+  assert.equal(r.data, target);
 });
 
 test('envelope links stay reasonable in size', async () => {

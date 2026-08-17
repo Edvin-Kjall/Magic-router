@@ -26,7 +26,7 @@ import { deriveKey, ARGON2ID } from './kd.js';
 import { aesEncrypt, aesDecrypt, aesEncryptNoIv, aesDecryptNoIv, importAesKey } from './aes.js';
 import { splitSecret, combineShares } from './shamir.js';
 import { hashChain } from './timelock.js';
-import { dictCompress, dictDecompress } from './dict.js';
+import { dictCompressEx, dictDecompress, dictDecompressLegacy } from './dict.js';
 
 export const PREFIX = 's3.';
 export const COMPACT_PREFIX = 's5.';
@@ -47,25 +47,31 @@ async function sha256(bytes) {
 }
 
 // Payload pre-compression for URL payloads: shared dictionary + deflate
-// BEFORE encryption. Flag byte: 0 raw · 1 dict+deflate · 2 dict-only.
-// URLs always start with 'h', so legacy flag-less payloads are unambiguous.
+// BEFORE encryption. Flag byte: 0 raw · 1 legacy-dict+deflate · 2 legacy-dict
+// · 3 ext-dict+deflate · 4 ext-dict. URLs always start with 'h', so legacy
+// flag-less payloads are unambiguous. Flags 3/4 carry the extended (v2)
+// dictionary; an older page misdecoding them always hits a >=0x80 byte and
+// fails loudly instead of silently showing the wrong destination.
 // (Safe against CRIME-style attacks: links are created once by their owner,
 // with no attacker-influenced plaintext oracle.)
 async function preparePayload(type, data) {
   const raw = toBytes(String(data));
   if (type !== 'url') return raw;
-  const d = dictCompress(raw);
+  const { bytes: d, extended } = dictCompressEx(raw);
   if (d.length >= raw.length) return concatBytes(new Uint8Array([0]), raw);
   const { flag, bytes } = await deflateMaybe(d);
-  return concatBytes(new Uint8Array([flag ? 1 : 2]), bytes);
+  const f = flag ? (extended ? 3 : 1) : (extended ? 4 : 2);
+  return concatBytes(new Uint8Array([f]), bytes);
 }
 
 async function restorePayload(type, bytes) {
   if (type !== 'url' || bytes.length === 0) return bytes;
   const f = bytes[0];
   if (f === 0) return bytes.subarray(1);
-  if (f === 1) return dictDecompress(await inflateMaybe(1, bytes.subarray(1)));
-  if (f === 2) return dictDecompress(bytes.subarray(1));
+  if (f === 1) return dictDecompressLegacy(await inflateMaybe(1, bytes.subarray(1)));
+  if (f === 2) return dictDecompressLegacy(bytes.subarray(1));
+  if (f === 3) return dictDecompress(await inflateMaybe(1, bytes.subarray(1)));
+  if (f === 4) return dictDecompress(bytes.subarray(1));
   return bytes; // legacy flag-less payload
 }
 
@@ -160,7 +166,7 @@ export function isPlainLink(s) {
 
 export async function encodePlainUrl(url) {
   let s = String(url);
-  let flags = 0; // bit0 deflated · bits1-2 scheme (0 none, 1 http, 2 https) · bit3 www. stripped · bit4 dictionary-tokenized
+  let flags = 0; // bit0 deflated · bits1-2 scheme (0 none, 1 http, 2 https) · bit3 www. stripped · bit4 dictionary-tokenized · bit5 v2 (extended) dictionary
   if (/^https:\/\//i.test(s)) {
     flags |= 2 << 1;
     s = s.slice(8);
@@ -173,9 +179,10 @@ export async function encodePlainUrl(url) {
     s = s.slice(4);
   }
   let body = toBytes(s);
-  const d = dictCompress(body);
+  const { bytes: d, extended } = dictCompressEx(body);
   if (d.length < body.length) {
     flags |= 1 << 4;
+    if (extended) flags |= 1 << 5;
     body = d;
   }
   const { flag, bytes } = await deflateMaybe(body);
@@ -189,7 +196,7 @@ export async function decodePlainUrl(str) {
   const flags = raw[0];
   const scheme = (flags >> 1) & 3;
   let bytes = await inflateMaybe(flags & 1, raw.subarray(1));
-  if (flags & 16) bytes = dictDecompress(bytes);
+  if (flags & 16) bytes = (flags & 32) ? dictDecompress(bytes) : dictDecompressLegacy(bytes);
   let s = toStr(bytes);
   if (flags & 8) s = 'www.' + s;
   if (scheme === 2) s = 'https://' + s;
