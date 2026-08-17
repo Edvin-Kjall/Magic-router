@@ -129,16 +129,30 @@ export function isPlainLink(s) {
 }
 
 export async function encodePlainUrl(url) {
-  const { flag, bytes } = await deflateMaybe(toBytes(String(url)));
-  return PLAIN_PREFIX + bytesToB64u(concatBytes(new Uint8Array([flag]), bytes));
+  let s = String(url);
+  let scheme = 0; // 0 none, 1 http://, 2 https:// (bits 1-2 of the flag byte)
+  if (/^https:\/\//i.test(s)) {
+    scheme = 2;
+    s = s.slice(8);
+  } else if (/^http:\/\//i.test(s)) {
+    scheme = 1;
+    s = s.slice(7);
+  }
+  const { flag, bytes } = await deflateMaybe(toBytes(s));
+  const flags = flag | (scheme << 1);
+  return PLAIN_PREFIX + bytesToB64u(concatBytes(new Uint8Array([flags]), bytes));
 }
 
 export async function decodePlainUrl(str) {
   if (str.startsWith(PLAIN_PREFIX)) str = str.slice(PLAIN_PREFIX.length);
   const raw = b64uToBytes(str);
-  const flag = raw[0];
-  const bytes = await inflateMaybe(flag, raw.subarray(1));
-  return toStr(bytes);
+  const flags = raw[0];
+  const scheme = (flags >> 1) & 3;
+  const bytes = await inflateMaybe(flags & 1, raw.subarray(1));
+  let s = toStr(bytes);
+  if (scheme === 2) s = 'https://' + s;
+  else if (scheme === 1) s = 'http://' + s;
+  return s;
 }
 
 // ------------------------------------------------------------ (en)coding

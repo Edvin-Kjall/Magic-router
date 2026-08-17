@@ -218,8 +218,15 @@ async function onCreate(e) {
         ? `${location.origin}/_u/${full}`
         : `${location.origin}/#${full}`;
       $('link-out').value = linkUrl;
-      $('result-hint').textContent =
-        'This link is not encrypted — anyone with it can see and open the destination. Short, but no secrets.';
+      if (linkUrl.length >= raw.length) {
+        // Honesty: the router's own host prefix means short destinations
+        // are shorter on their own.
+        $('result-hint').textContent =
+          `Your destination is already short (${raw.length} characters) — this link would be longer than just sharing the URL itself. No shortening service can beat a URL this small.`;
+      } else {
+        $('result-hint').textContent =
+          'This link is not encrypted — anyone with it can see and open the destination. Short, but no secrets.';
+      }
       $('create-form').hidden = true;
       $('create-result').hidden = false;
       qrRendered = false;

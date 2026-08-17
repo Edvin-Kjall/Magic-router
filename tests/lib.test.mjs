@@ -228,6 +228,11 @@ test('plain (unencrypted) short links round-trip and are much shorter', async ()
   assert.equal(await decodePlainUrl(short), target);
   const sealed = await encodeEnvelope(await seal({ type: 'url', data: target, passwords: ['pw'], kdf: KDF }));
   assert.ok(short.length < sealed.length, `plain ${short.length} should be shorter than sealed ${sealed.length}`);
+
+  // short URLs: scheme is stripped and re-added, round-trip stays exact
+  const short2 = await encodePlainUrl('https://inosida.se');
+  assert.equal(await decodePlainUrl(short2), 'https://inosida.se');
+  assert.ok(!short2.includes('aHR0cDov'), 'scheme should not be base64-encoded');
 });
 
 test('envelope links stay reasonable in size', async () => {
