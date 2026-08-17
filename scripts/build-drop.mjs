@@ -38,5 +38,6 @@ writeFileSync(`${outdir}/index.html`, html);
 copyFileSync('site/public/style.css', `${outdir}/style.css`);
 copyFileSync('site/public/favicon.svg', `${outdir}/favicon.svg`);
 copyFileSync('site/public/data/eff-large.txt', `${outdir}/eff-large.txt`);
+copyFileSync('site/public/deep-v1.json.gz', `${outdir}/deep-v1.json.gz`);
 
-console.log(`drop build ready in ${outdir}/ (index.html, bundle.js, style.css, favicon.svg, eff-large.txt)`);
+console.log(`drop build ready in ${outdir}/ (index.html, bundle.js, style.css, favicon.svg, eff-large.txt, deep-v1.json.gz)`);

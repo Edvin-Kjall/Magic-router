@@ -36,8 +36,18 @@ import {
 } from '../site/public/lib/envelope.js';
 import { estimateHashRate, formatDuration } from '../site/public/lib/timelock.js';
 import { toString as qrTerminal } from 'qrcode';
+import { setDeepTokens } from '../site/public/lib/dict.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+// Load the deep dictionary (same one the page downloads) so CLI links are
+// just as small. Missing file = shallow dictionary only.
+try {
+  const deep = JSON.parse(readFileSync(join(here, '..', 'site', 'public', 'deep-v1.json'), 'utf8'));
+  setDeepTokens(deep);
+} catch {
+  /* shallow dictionary only */
+}
 
 const HELP = `
 Magic Router CLI — stateless encrypted links.

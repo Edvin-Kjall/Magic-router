@@ -310,6 +310,28 @@ test('locale and word tokens shrink the cloudflare registrar link', async () => 
   assert.equal(await decodePlainUrl(oldLink), url);
 });
 
+test('deep dictionary shrinks links far below the shallow dict', async () => {
+  // Node loads deep-v1.json.gz from the repo next to dict.js — no network.
+  const { ensureDeepDict } = await import('../site/public/lib/dict.js');
+  await ensureDeepDict();
+  const { encodePlainUrl, decodePlainUrl } = await import('../site/public/lib/envelope.js');
+  const url = 'https://openrouter.ai/deepseek/deepseek-v4-flash-0731';
+  const link = await encodePlainUrl(url);
+  assert.ok(link.startsWith('u2.'), `deep link should use the u2 prefix, got ${link}`);
+  assert.ok(link.length < 36, `deep link should be tiny, got ${link.length}: ${link}`);
+  assert.equal(await decodePlainUrl(link), url);
+  // encrypted deep links round-trip too
+  const env = await seal({ type: 'url', data: url, passwords: ['pw'], kdf: KDF });
+  const str = await encodeEnvelope(env);
+  assert.ok(str.length < 90, `deep sealed link should shrink, got ${str.length}`);
+  const r = await open(str, { password: 'pw' });
+  assert.equal(r.data, url);
+  // trivial links stay on the shallow tiers (no u2, no dict download needed)
+  const plain2 = await encodePlainUrl('https://example.com/api/v1/users?id=42');
+  assert.ok(plain2.startsWith('u1.'), `core-covered links stay u1, got ${plain2}`);
+  assert.equal(await decodePlainUrl(plain2), 'https://example.com/api/v1/users?id=42');
+});
+
 test('sealed links with extended-dictionary URLs round-trip', async () => {
   const target = 'https://www.tiktok.com/@user/video/1234567890';
   const env = await seal({ type: 'url', data: target, passwords: ['pw'], kdf: KDF });

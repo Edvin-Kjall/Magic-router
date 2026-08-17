@@ -157,6 +157,88 @@ for (const s of [...ordered, ...GLOBAL_WORDS]) {
   }
 }
 
+// ================================================================ deep dict
+// The DEEP dictionary is a downloadable asset (site/public/deep-v1.json.gz,
+// served at /deep-v1.json.gz), fetched once and cached by the browser. It is
+// NOT in the page bundle, so it can be orders of magnitude bigger: top-10k
+// domains, the EFF common-words list, and curated tech/AI terms. Links that
+// use it carry payload flags 7/8 (encrypted) or the u2. prefix (plain) and
+// cost the opener one download — the 3-5 s budget the user opted into.
+//
+// Deep streams keep the core 1-byte tokens and v3 literal runs, and encode
+// deep tokens as 3 bytes: 0xFF (0x80|hi) lo. The table is frozen at
+// deep-v1: future changes ship as deep-v2 with a new link prefix.
+
+const DEEP_TLDS = [
+  '.us', '.me', '.eu', '.info', '.biz', '.cc', '.xyz', '.top', '.vip',
+  '.site', '.online', '.shop', '.store', '.live', '.news', '.media',
+  '.world', '.email', '.tech', '.link', '.club', '.pro', '.space', '.fun',
+  '.icu', '.lol', '.wiki', '.win', '.games', '.life', '.love', '.one',
+  '.run', '.zone', '.plus', '.page', '.digital', '.agency', '.studio',
+  '.academy', '.company', '.expert', '.guru', '.systems', '.solutions',
+  '.technology', '.software', '.ninja', '.codes', '.directory', '.services',
+];
+
+const TECH_WORDS = [
+  // AI labs & models
+  'deepseek', 'openrouter', 'openrouter.ai', '/deepseek', 'chatgpt', 'openai',
+  'anthropic', 'claude', 'gemini', 'grok', 'llama', 'mistral', 'qwen',
+  'perplexity', 'huggingface', 'kaggle', 'colab', 'jupyter', 'pytorch',
+  'tensorflow', 'keras', 'numpy', 'pandas', 'scikit-learn', 'transformers',
+  'diffusers', 'langchain', 'llamaindex', 'arxiv', 'paperswithcode',
+  'replicate', 'together', 'fireworks', 'groq', 'cerebras', 'nvidia',
+  // API/ML vocabulary
+  'model', 'models', 'chat', 'completions', 'embeddings', 'assistants',
+  'threads', 'runs', 'messages', 'fine-tuning', 'fine-tunes', 'inference',
+  'endpoint', 'endpoints', 'playground', 'dashboard', 'api-reference',
+  'getting-started', 'quickstart', 'tutorial', 'tutorials', 'examples',
+  'credits', 'billing', 'usage', 'tokens', 'context', 'parameters',
+  'temperature', 'stream', 'streaming', 'prompt', 'prompts', 'completion',
+  'response', 'responses', 'generation', 'generations', 'multimodal',
+  'vision', 'audio', 'speech', 'transcription', 'translation', 'vector',
+  'vectors', 'retrieval', 'rag', 'agents', 'agent', 'workflow',
+  'workflows', 'automation', 'deploy', 'deployment', 'preview',
+  'production', 'sandbox', 'self-hosted', 'open-source',
+  // model families & version suffixes (shared across every AI provider)
+  'flash', 'flash-lite', 'flash-thinking', 'v1', 'v2', 'v3', 'v4', 'v5',
+  'v6', 'v7', 'v8', 'pro', 'lite', 'mini', 'nano', 'turbo', 'sonnet',
+  'haiku', 'opus', 'nova', 'spark', 'reasoning', 'reasoner', 'coder',
+  'math', 'thinking', 'think', 'gpt-4o', 'gpt-4', 'gpt-3',
+  // dev ecosystem
+  'docker', 'kubernetes', 'helm', 'terraform', 'ansible', 'gitlab',
+  'bitbucket', 'stackoverflow', 'devto', 'hashnode', 'discord', 'telegram',
+  'slack', 'notion', 'linear', 'figma', 'canva', 'vercel', 'netlify',
+  'cloudflare', 'fly', 'railway', 'render', 'heroku', 'digitalocean',
+  'hetzner', 'supabase', 'firebase', 'planetscale', 'neon', 'turso',
+  'upstash', 'redis', 'mongodb', 'postgres', 'postgresql', 'mysql',
+  'sqlite', 'duckdb', 'clickhouse', 'snowflake', 'databricks', 'bigquery',
+  'redshift', 'kafka', 'rabbitmq', 'grpc', 'graphql', 'rest', 'websocket',
+  'oauth', 'jwt', 'serverless', 'edge', 'cdn', 's3', 'ec2', 'lambda',
+  'cloudfront', 'dynamodb', 'sagemaker', 'bedrock', 'copilot', 'cursor',
+  'windsurf', 'vscode', 'jetbrains', 'intellij', 'pycharm', 'webstorm',
+];
+
+// ---- build the deep table ----
+// Order = value: the extended table and tech/word tokens come first; the
+// first HOT_LIMIT entries also get 2-byte hot codes (see dict.js).
+const HOT_LIMIT = 1280;
+const deep10k = readFileSync(join(repo, 'data', 'top-10000-domains.txt'), 'utf8')
+  .split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+const effWords = readFileSync(join(repo, 'site', 'public', 'data', 'eff-large.txt'), 'utf8')
+  .split('\n').map((l) => l.trim().toLowerCase()).filter(Boolean);
+const deep = [];
+const deepSeen = new Set();
+for (const s of [...extended, ...TECH_WORDS, ...GLOBAL_WORDS, ...DEEP_TLDS, ...deep10k, ...effWords]) {
+  const t = String(s).toLowerCase();
+  if (deepSeen.has(t)) continue;
+  if (t.length < 2) continue;
+  if (coreCost(t) <= 3) continue; // core tokens already cover it
+  deepSeen.add(t);
+  deep.push(t);
+}
+if (deep.length >= 32768) throw new Error('deep dictionary exceeds the 15-bit code space');
+if (deep.length < HOT_LIMIT) throw new Error('deep dictionary smaller than the hot zone');
+
 // ---------------------------------------------------------------- emit
 const list = (arr) => '[\n' + arr.map((s) => '  ' + JSON.stringify(s)).join(',\n') + '\n]';
 
@@ -187,7 +269,7 @@ const out = `// Shared URL dictionary — "preset dictionary" compression (the t
 
 const TOKENS = ${list(fullCore)};
 
-if (TOKENS.length > 255) throw new Error('dictionary too large');
+if (TOKENS.length > 250) throw new Error('dictionary too large (codes 250-254 are reserved for deep hot tokens)');
 
 // Extended tokens (Cisco Umbrella worldwide top-1000 + locale/word tokens,
 // minus anything the core tokens already cover in <=3 bytes).
@@ -391,15 +473,245 @@ export function dictDecompressV3(bytes) {
   return new Uint8Array(out);
 }
 
+// =============================================================== deep dict
+// Downloadable dictionary (deep-v1.json.gz at the site root). Fetched once,
+// cached (Cache API in browsers), and used by payload flags 7/8 (encrypted)
+// and the u2. plain-link prefix. Deep tokens are 3 bytes:
+// 0xFF (0x80|hi) lo, indexing this table; core tokens and v3 runs still
+// apply. The table is frozen per version — deep-v2 will be a new file.
+
+let DEEP = null;
+let DEEP_BY_FIRST = null;
+let deepPromise = null;
+
+export function setDeepTokens(arr) {
+  DEEP = arr;
+  DEEP_BY_FIRST = [];
+  for (let i = 0; i < arr.length; i++) {
+    const c = String(arr[i]).charCodeAt(0) & 0xff;
+    (DEEP_BY_FIRST[c] ?? (DEEP_BY_FIRST[c] = [])).push(i);
+  }
+  return arr;
+}
+
+export function hasDeep() {
+  return DEEP !== null;
+}
+
+async function fetchDeepBytes() {
+  // browser: Cache API around the same-origin asset
+  if (typeof caches !== 'undefined') {
+    try {
+      const cache = await caches.open('mr-deep-dict-v1');
+      const url = new URL('deep-v1.json.gz', globalThis.location.href).href;
+      let res = await cache.match(url);
+      if (!res) {
+        res = await fetch(url);
+        if (res.ok) cache.put(url, res.clone());
+      }
+      if (!res.ok) throw new Error('deep dictionary fetch failed');
+      return new Uint8Array(await res.arrayBuffer());
+    } catch {
+      /* fall through to network */
+    }
+  }
+  if (typeof location !== 'undefined' && location.href) {
+    const res = await fetch(new URL('deep-v1.json.gz', location.href).href);
+    if (!res.ok) throw new Error('deep dictionary fetch failed');
+    return new Uint8Array(await res.arrayBuffer());
+  }
+  // Node (CLI/tests): read the asset from the repo next to this module
+  try {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const p = fileURLToPath(new URL('../deep-v1.json.gz', import.meta.url));
+    return new Uint8Array(readFileSync(p));
+  } catch {
+    /* fall through */
+  }
+  throw new Error('deep dictionary unavailable');
+}
+
+async function gunzipMaybe(bytes) {
+  if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+    if (typeof DecompressionStream !== 'undefined') {
+      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+      return new Uint8Array(await new Response(stream).arrayBuffer());
+    }
+    try {
+      const zlib = await import('node:zlib');
+      return new Uint8Array(zlib.gunzipSync(bytes));
+    } catch {
+      /* fall through */
+    }
+  }
+  return bytes;
+}
+
+export async function ensureDeepDict() {
+  if (DEEP) return DEEP;
+  if (deepPromise) return deepPromise;
+  deepPromise = (async () => {
+    const bytes = await fetchDeepBytes();
+    const raw = await gunzipMaybe(bytes);
+    setDeepTokens(JSON.parse(new TextDecoder().decode(raw)));
+    return DEEP;
+  })();
+  try {
+    return await deepPromise;
+  } catch (err) {
+    deepPromise = null;
+    throw err;
+  }
+}
+
+// longest hot-token match at bytes[i] (deep table prefix, 2-byte codes)
+const HOT_LIMIT = 5 * 256;
+function hotMatch(bytes, i) {
+  if (!DEEP_BY_FIRST) return { len: 0, idx: -1 };
+  const bucket = DEEP_BY_FIRST[bytes[i] & 0xff];
+  if (!bucket) return { len: 0, idx: -1 };
+  let len = 0;
+  let idx = -1;
+  for (const t of bucket) {
+    if (t >= HOT_LIMIT) continue;
+    const s = String(DEEP[t]);
+    if (s.length <= len || i + s.length > bytes.length) continue;
+    let ok = true;
+    for (let k = 0; k < s.length; k++) {
+      if ((s.charCodeAt(k) & 0xff) !== bytes[i + k]) { ok = false; break; }
+    }
+    if (ok) { len = s.length; idx = t; }
+  }
+  return { len, idx };
+}
+
+// longest deep-token match at bytes[i]
+function deepMatch(bytes, i) {
+  if (!DEEP_BY_FIRST) return { len: 0, idx: -1 };
+  const bucket = DEEP_BY_FIRST[bytes[i] & 0xff];
+  if (!bucket) return { len: 0, idx: -1 };
+  let len = 0;
+  let idx = -1;
+  for (const t of bucket) {
+    const s = String(DEEP[t]);
+    if (s.length <= len || i + s.length > bytes.length) continue;
+    let ok = true;
+    for (let k = 0; k < s.length; k++) {
+      if ((s.charCodeAt(k) & 0xff) !== bytes[i + k]) { ok = false; break; }
+    }
+    if (ok) { len = s.length; idx = t; }
+  }
+  return { len, idx };
+}
+
+// deep compressor: core tokens (1 B) + hot tokens (2 B, deep idx < 1280)
+// + deep tokens (3 B) + v3 literal runs
+export function dictCompressDeep(bytes) {
+  const out = [];
+  let i = 0;
+  let usedDeep = false;
+  while (i < bytes.length) {
+    const { match, matchLen } = trieMatch(bytes, i);
+    const h = hotMatch(bytes, i);
+    const d = deepMatch(bytes, i);
+    const cands = [];
+    if (match !== -1) cands.push({ cost: 1, len: matchLen, code: match, idx: -1 });
+    if (h.len > 0) cands.push({ cost: 2, len: h.len, code: 250 + (h.idx >> 8), idx: h.idx });
+    if (d.len > 0) cands.push({ cost: 3, len: d.len, code: 0xff, idx: d.idx });
+    let best = null;
+    for (const c of cands) {
+      if (!best || c.cost * best.len < best.cost * c.len) best = c;
+    }
+    if (best) {
+      if (best.cost === 1) {
+        out.push(best.code);
+      } else if (best.cost === 2) {
+        out.push(best.code, best.idx & 0xff);
+        usedDeep = true;
+      } else {
+        out.push(ESC, 0x80 | (best.idx >> 8), best.idx & 0xff);
+        usedDeep = true;
+      }
+      i += best.len;
+      continue;
+    }
+    let run = 0;
+    while (i + run < bytes.length &&
+           trieMatch(bytes, i + run).match === -1 &&
+           deepMatch(bytes, i + run).len === 0) run++;
+    if (run >= 3) {
+      while (run > 0) {
+        const n = Math.min(run, 255);
+        out.push(ESC, 0, n);
+        for (let k = 0; k < n; k++) out.push(bytes[i + k]);
+        i += n;
+        run -= n;
+      }
+    } else {
+      for (let k = 0; k < run; k++) {
+        const b = bytes[i];
+        if (b === 0 || b >= 0x80) out.push(ESC, 0, b);
+        else out.push(ESC, b);
+        i++;
+      }
+    }
+  }
+  return { bytes: new Uint8Array(out), usedDeep };
+}
+
+// deep decoder (payload flags 7/8, u2. links): same grammar as v3, but the
+// 0xFF hi>=0x80 codes index DEEP instead of EXTENDED.
+export function dictDecompressDeep(bytes) {
+  const out = [];
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if (b === ESC) {
+      const n = bytes[++i];
+      if (n === undefined) { out.push(0); break; }
+      if (n >= 0x80) {
+        const idx = ((n & 0x7f) << 8) | (bytes[++i] ?? 0);
+        const s = DEEP?.[idx];
+        if (s === undefined) throw new Error(\`unknown deep token \${idx}\`);
+        for (let k = 0; k < s.length; k++) out.push(s.charCodeAt(k) & 0xff);
+      } else if (n === 0) {
+        const len = bytes[++i] ?? 0;
+        for (let k = 0; k < len; k++) out.push(bytes[++i] ?? 0);
+      } else {
+        out.push(n);
+      }
+    } else if (b >= 250) {
+      const idx = (b - 250) * 256 + (bytes[++i] ?? 0);
+      const s = DEEP?.[idx];
+      if (s === undefined) throw new Error(\`unknown hot token \${idx}\`);
+      for (let k = 0; k < s.length; k++) out.push(s.charCodeAt(k) & 0xff);
+    } else {
+      const tok = TOKENS[b];
+      if (tok === undefined) throw new Error(\`unknown dictionary token \${b}\`);
+      for (let k = 0; k < tok.length; k++) out.push(tok.charCodeAt(k) & 0xff);
+    }
+  }
+  return new Uint8Array(out);
+}
+
 export { TOKENS, EXTENDED };
 `;
 
 writeFileSync(join(repo, 'site', 'public', 'lib', 'dict.js'), out);
+
+// deep dictionary asset: plain JSON for debugging + gzipped for serving
+import { gzipSync } from 'node:zlib';
+const deepJson = JSON.stringify(deep);
+writeFileSync(join(repo, 'site', 'public', 'deep-v1.json'), deepJson + '\n');
+writeFileSync(join(repo, 'site', 'public', 'deep-v1.json.gz'), gzipSync(deepJson, { level: 9 }));
 console.log(JSON.stringify({
   coreTokens: fullCore.length,
   tldTokens: EXTRA_TLDS.length,
   labelTokens: labels.length,
   extended: extended.length,
+  deep: deep.length,
+  deepJsonBytes: deepJson.length,
+  deepGzBytes: gzipSync(deepJson, { level: 9 }).length,
 }));
 console.log('labels:', labels.join(' '));
 console.log('first extended:', extended.slice(0, 25).join(' '));

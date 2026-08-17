@@ -24,6 +24,7 @@ import {
 } from './lib/envelope.js';
 import { estimateHashRate, formatDuration } from './lib/timelock.js';
 import { toCanvas } from 'qrcode';
+import { ensureDeepDict } from './lib/dict.js';
 
 const CFG = {
   repo: 'https://github.com/Edvin-Kjall/Magic-router',
@@ -680,6 +681,10 @@ function bindStatic() {
 async function init() {
   bindStatic();
   refreshAdvancedRows();
+
+  // Warm the deep dictionary cache in the background: first seal/open of a
+  // deep link then needs no wait at all.
+  ensureDeepDict().catch(() => {});
 
   const pre = new URLSearchParams(location.search).get('url');
   if (pre) {

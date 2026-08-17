@@ -124,6 +124,9 @@ tests/                  node:test suites (22 tests)
 - Links are **not short** — they carry their own ciphertext (typically ~110 chars for a
   one-password link thanks to the v6 binary envelope plus a shared dictionary covering
   the top 1000 domains and common URL structures; even rich links stay well under 2 KB).
+  For the smallest possible links, the page downloads a bigger dictionary once
+  (~100 KB, cached forever) that covers the top 10 000 domains and common words —
+  that's the `u2.` plain links and payload flags 7/8.
 - Stateless links **cannot be revoked or expired** — only passwords can stop being
   shared. Premium mode trades a little state for those features.
 - Browsers store full URLs in history and sync them; embedded-password links are
