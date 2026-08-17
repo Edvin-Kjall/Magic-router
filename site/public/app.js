@@ -10,6 +10,9 @@ import {
   decodeEnvelope,
   splitEmbedded,
   isSealedLink,
+  isPlainLink,
+  encodePlainUrl,
+  decodePlainUrl,
   describeEnvelope,
   generateRecipientKeypair,
   generateSignerIdentity,
@@ -111,6 +114,7 @@ function activeAdvanced() {
   if ($('adv-note').value.trim()) out.push('Note');
   if ($('adv-path').checked) out.push('Path-style');
   if ($('adv-preview').checked) out.push('Preview');
+  if ($('adv-plain').checked) out.push('Short (no encryption)');
   return out;
 }
 
@@ -126,7 +130,7 @@ function updateAdvancedSummary() {
 }
 
 function clearAdvanced() {
-  for (const id of ['adv-prf', 'adv-pub', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-sign-pq', 'adv-path', 'adv-preview']) {
+  for (const id of ['adv-prf', 'adv-pub', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-sign-pq', 'adv-path', 'adv-preview', 'adv-plain']) {
     $(id).checked = false;
   }
   $('adv-timelock').value = 'off';
@@ -204,6 +208,30 @@ async function onCreate(e) {
   btn.disabled = true;
   btn.textContent = 'Sealing…';
   try {
+    // Plain mode: no encryption, just compression. Anyone with the link can
+    // read the destination — short, stateless, frictionless.
+    if ($('adv-plain').checked) {
+      const raw = $('payload').value.trim();
+      if (!/^https?:\/\//i.test(raw)) throw new SealError('Short mode needs a URL — it must start with https://');
+      const full = await encodePlainUrl(raw);
+      const linkUrl = $('adv-path').checked
+        ? `${location.origin}/_u/${full}`
+        : `${location.origin}/#${full}`;
+      $('link-out').value = linkUrl;
+      $('result-hint').textContent =
+        'This link is not encrypted — anyone with it can see and open the destination. Short, but no secrets.';
+      $('create-form').hidden = true;
+      $('create-result').hidden = false;
+      qrRendered = false;
+      $('qr-canvas').hidden = true;
+      $('qr-toggle').textContent = 'Show QR code';
+      const orb = $('seal-orb');
+      orb.classList.remove('stamping');
+      void orb.offsetWidth;
+      orb.classList.add('stamping');
+      $('share-btn').hidden = typeof navigator.share !== 'function';
+      return;
+    }
     const { opts, tl } = buildSealOpts();
     if (opts.recipient instanceof File) {
       opts.recipient = JSON.parse(await opts.recipient.text());
@@ -229,6 +257,8 @@ async function onCreate(e) {
       ? `${location.origin}/_u/${full}`
       : `${location.origin}/#${full}`;
     $('link-out').value = linkUrl;
+    $('result-hint').textContent =
+      'Share it however you like. Send the password separately — a different message or app is strongest.';
 
     $('create-form').hidden = true;
     $('create-result').hidden = false;
@@ -294,6 +324,11 @@ async function route() {
         return;
       }
       const body = await res.json();
+      // Premium short slugs: plaintext redirect, no unlock step.
+      if (body.redirect) {
+        location.replace(body.redirect);
+        return;
+      }
       currentLink = { str: body.envelope, tail: null, mode: 'hosted', hostedMeta: body.meta };
       await beginOpen(body.envelope, null, body.meta);
     } else {
@@ -302,6 +337,16 @@ async function route() {
         str = decodeURIComponent(str);
       } catch {
         /* keep raw */
+      }
+      // Stateless short mode: unencrypted, compressed URL — open instantly.
+      if (isPlainLink(str)) {
+        const url = await decodePlainUrl(str);
+        if (/^https?:\/\//i.test(url)) {
+          location.replace(url);
+          return;
+        }
+        showView('create');
+        return;
       }
       if (/^v[12]\./.test(str)) {
         legacyOpen(str);
@@ -581,7 +626,7 @@ function bindStatic() {
   });
 
   // advanced
-  for (const id of ['adv-prf', 'adv-pub', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-sign-pq', 'adv-path', 'adv-preview']) {
+  for (const id of ['adv-prf', 'adv-pub', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-sign-pq', 'adv-path', 'adv-preview', 'adv-plain']) {
     $(id).addEventListener('change', () => {
       refreshAdvancedRows();
       updateAdvancedSummary();

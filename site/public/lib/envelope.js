@@ -117,6 +117,30 @@ async function inflateIfPossible(bytes) {
   }
 }
 
+// ------------------------------------------------------- plain (short) mode
+
+// Unencrypted short links: u1.<base64url( FLAG || maybe-deflate( URL ) )>.
+// No crypto, no storage — just compression. Anyone holding the link can
+// decode the destination, which is exactly what "no encryption" means.
+export const PLAIN_PREFIX = 'u1.';
+
+export function isPlainLink(s) {
+  return typeof s === 'string' && s.startsWith(PLAIN_PREFIX);
+}
+
+export async function encodePlainUrl(url) {
+  const { flag, bytes } = await deflateMaybe(toBytes(String(url)));
+  return PLAIN_PREFIX + bytesToB64u(concatBytes(new Uint8Array([flag]), bytes));
+}
+
+export async function decodePlainUrl(str) {
+  if (str.startsWith(PLAIN_PREFIX)) str = str.slice(PLAIN_PREFIX.length);
+  const raw = b64uToBytes(str);
+  const flag = raw[0];
+  const bytes = await inflateMaybe(flag, raw.subarray(1));
+  return toStr(bytes);
+}
+
 // ------------------------------------------------------------ (en)coding
 
 // Compact v4 encoding: same data, short JSON keys. Shrinks links ~35-40%

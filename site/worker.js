@@ -143,15 +143,26 @@ async function premiumCreate(request, env, url) {
   }
   const slug = body.slug ?? randomSlug();
   if (!SLUG_RE.test(slug)) return Response.json({ error: 'slug must be 3-64 chars of a-z0-9_-' }, { status: 400, headers: JSON_HEADERS });
-  const envelope = String(body.envelope ?? '');
-  if (!envelope.startsWith('s3.') || envelope.length > 16384) {
-    return Response.json({ error: 'envelope must be an s3. link (≤16 KiB)' }, { status: 400, headers: JSON_HEADERS });
+
+  // Short mode: plaintext redirect (no encryption — the caller's explicit choice).
+  const redirect = typeof body.url === 'string' ? body.url : null;
+  if (redirect && !/^https?:\/\//i.test(redirect)) {
+    return Response.json({ error: 'url must start with http:// or https://' }, { status: 400, headers: JSON_HEADERS });
+  }
+  let envelope = String(body.envelope ?? '');
+  if (redirect) envelope = '';
+  if (!redirect && !(envelope.startsWith('s3.') || envelope.startsWith('s4.'))) {
+    return Response.json({ error: 'provide either url (short mode) or an s3./s4. envelope' }, { status: 400, headers: JSON_HEADERS });
+  }
+  if (envelope.length > 16384) {
+    return Response.json({ error: 'envelope must be ≤16 KiB' }, { status: 400, headers: JSON_HEADERS });
   }
   if (await env.SEAL_KV.get('link:' + slug)) {
     return Response.json({ error: 'slug already taken' }, { status: 409, headers: JSON_HEADERS });
   }
   const row = {
     envelope,
+    redirect,
     burn: body.burn === true,
     exp: body.exp ? new Date(body.exp).toISOString() : null,
     created: Date.now(),
@@ -177,7 +188,11 @@ async function premiumFetch(env, slug) {
   // Burn-after-read: delete before responding. Honest caveat: a client that
   // already fetched it once can still decrypt offline — see docs/PREMIUM.md.
   if (raw.burn) await env.SEAL_KV.delete('link:' + slug);
-  return Response.json({ envelope: raw.envelope, meta: { fetches: meta.fetches, burnt: raw.burn === true, exp: raw.exp } }, { headers: JSON_HEADERS });
+  const metaOut = { fetches: meta.fetches, burnt: raw.burn === true, exp: raw.exp };
+  return Response.json(
+    raw.redirect ? { redirect: raw.redirect, meta: metaOut } : { envelope: raw.envelope, meta: metaOut },
+    { headers: JSON_HEADERS }
+  );
 }
 
 async function premiumDelete(env, slug) {

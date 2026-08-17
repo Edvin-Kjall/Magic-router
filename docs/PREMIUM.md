@@ -37,9 +37,15 @@ Set `PREMIUM = "true"` in `[vars]`, then `npx wrangler deploy`.
 
 ```
 POST   /api/link              { slug?, envelope, exp?, burn? } → { slug, url }
-GET    /api/link/<slug>       → { envelope, meta: { fetches, burnt, exp } } | 410
+POST   /api/link              { slug?, url, exp?, burn? }       → { slug, url }  (short mode)
+GET    /api/link/<slug>       → { envelope, meta } | { redirect, meta } | 410
 DELETE /api/link/<slug>       → { revoked }   (unauthenticated — see below)
 ```
+
+`envelope` links unlock exactly like stateless links. `url` links are **short
+mode**: the destination is stored in plaintext behind an 8-character slug and
+redirects immediately — the shortest possible link, for when you don't need
+encryption. Burn-after-read, expiry and counters apply to both.
 
 The page at `/s/<slug>` loads the app and fetches the envelope client-side, then
 unlocks exactly like a stateless link.

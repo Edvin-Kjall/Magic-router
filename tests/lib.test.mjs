@@ -22,6 +22,9 @@ import {
   verifySignatures,
   makeTimeLock,
   isSealedLink,
+  isPlainLink,
+  encodePlainUrl,
+  decodePlainUrl,
 } from '../site/public/lib/envelope.js';
 
 const KDF = ARGON2ID_FAST;
@@ -216,6 +219,15 @@ test('legacy v2 links (argon2id, deflate-compressed) still open', async () => {
   assert.equal(r.data, URL);
   assert.equal(r.type, 'url');
   await assert.rejects(openLegacy(blob, 'wrong'));
+});
+
+test('plain (unencrypted) short links round-trip and are much shorter', async () => {
+  const target = 'https://example.com/some/fairly/long/path?with=query&and=params';
+  const short = await encodePlainUrl(target);
+  assert.ok(isPlainLink(short));
+  assert.equal(await decodePlainUrl(short), target);
+  const sealed = await encodeEnvelope(await seal({ type: 'url', data: target, passwords: ['pw'], kdf: KDF }));
+  assert.ok(short.length < sealed.length, `plain ${short.length} should be shorter than sealed ${sealed.length}`);
 });
 
 test('envelope links stay reasonable in size', async () => {

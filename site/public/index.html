@@ -68,7 +68,7 @@
 
         <div id="create-result" hidden>
           <h2>Your sealed link</h2>
-          <p class="sub">Share it however you like. Send the password separately — a different
+          <p class="sub" id="result-hint">Share it however you like. Send the password separately — a different
             message or app is strongest.</p>
           <input id="link-out" type="text" readonly>
           <div class="row-actions">
@@ -228,6 +228,10 @@
 
       <div class="panel">
         <h2>Link style</h2>
+        <label class="switch-row">
+          <span class="switch-copy"><strong>Short link — no encryption</strong><small>Just compresses the destination into the link. Much shorter, still stored nowhere — but anyone with the link can read and open it. No password step.</small></span>
+          <input type="checkbox" id="adv-plain"><span class="switch"></span>
+        </label>
         <label class="switch-row">
           <span class="switch-copy"><strong>Destination preview</strong><small>Shows the domain before unlocking (and enables a pre-unlock domain check). Anyone with the link can see the domain — off by default so the destination stays fully encrypted.</small></span>
           <input type="checkbox" id="adv-preview"><span class="switch"></span>
