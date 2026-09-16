@@ -64,6 +64,7 @@ Usage:
                [--password <pw>]... [--embed <pw>] [--recipient <seal-key.json>]
                [--threshold <m>] [--delay <30s|5m|2h|1d>] [--expires <ISO-date>]
                [--note <text>] [--sign <seal-identity.json>] [--pq] [--preview]
+               [--no-strip] [--classical]
                [--host <origin>] [--path] [--qr] [--json]
                [--store [--slug <s>] [--burn]]
 
@@ -84,6 +85,10 @@ Notes:
   --store posts the envelope to the host's premium API and prints the short
   /s/<slug> URL (server stores ciphertext only; needs PREMIUM on the host).
   --burn makes the hosted envelope self-delete after one fetch.
+  --no-strip keeps tracking parameters (utm_*, fbclid, …) that are stripped
+    from the destination by default before encryption.
+  --classical seals to a recipient key with X25519 only — ~6× shorter link,
+    no post-quantum floor. Default is the X-Wing hybrid.
   open also accepts hosted https://host/s/<slug> links directly.
 `.trim();
 
@@ -95,7 +100,7 @@ function fail(msg) {
 
 // argv scanner: --flag value, --flag=value, --boolflag, repeatable flags.
 // A value flag without a value is an error, never a silent `true`.
-const BOOL_FLAGS = new Set(['json', 'qr', 'path', 'help', 'pq', 'preview', 'store', 'burn']);
+const BOOL_FLAGS = new Set(['json', 'qr', 'path', 'help', 'pq', 'preview', 'store', 'burn', 'no-strip', 'classical']);
 const VALUE_FLAGS = new Set([
   'url', 'text', 'embed', 'recipient', 'threshold', 'delay', 'expires',
   'note', 'sign', 'out', 'host', 'key', 'words', 'identity', 'slug',
@@ -176,6 +181,8 @@ async function cmdCreate(args) {
     opts.pq = true;
   }
   if (f.preview) opts.preview = true;
+  if (f['no-strip']) opts.strip = false;
+  if (f.classical) opts.classical = true;
 
   const env = await seal(opts);
   const frag = await encodeEnvelope(env);
@@ -326,10 +333,10 @@ async function cmdInfo(args, link) {
 
 async function cmdKeygen(args) {
   if (args.f.recipient) {
-    const kp = await generateRecipientKeypair();
+    const kp = await generateRecipientKeypair({ classical: args.f.classical === true });
     const out = args.f.out ?? 'seal-key.json';
     writeFileSync(out, JSON.stringify(kp, null, 2));
-    console.log(`recipient keypair written to ${out} (hybrid X25519 + ML-KEM-768)`);
+    console.log(`recipient keypair written to ${out} (${args.f.classical ? 'X25519 classical-only' : 'X-Wing hybrid — ML-KEM-768 + X25519'})`);
     console.log('Keep the file private. Anyone sealing TO you needs only the public part;');
     console.log('opening a link needs the whole file.');
   } else if (args.f.identity) {

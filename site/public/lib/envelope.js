@@ -28,6 +28,7 @@ import { aesEncrypt, aesDecrypt, aesEncryptNoIv, aesDecryptNoIv, importAesKey } 
 import { splitSecret, combineShares } from './shamir.js';
 import { hashChain, getRswModulus, rswTrapdoor, rswSolve, bigIntToBytes } from './timelock.js';
 import { dictCompressEx, dictDecompress, dictDecompressLegacy, dictDecompressV3, dictCompressDeep, dictDecompressDeep, dictDecompressDeepV1, ensureDeepDict, ensureDeepDictV1, hasDeep } from './dict.js';
+import { stripTrackingParams } from './trackers.js';
 
 export const PREFIX = 's3.';
 export const COMPACT_PREFIX = 's5.';
@@ -263,8 +264,8 @@ export function extractLinkFragment(input) {
   }
 }
 
-export async function encodePlainUrl(url) {
-  const original = String(url);
+export async function encodePlainUrl(url, opts = {}) {
+  const original = opts.strip === false ? String(url) : stripTrackingParams(url).url;
   let s = original;
   let flags = 0; // bit0 deflated · bits1-2 scheme (0 none, 1 http, 2 https) · bit3 www. stripped · bit4 dictionary-tokenized · bit5 v2 (extended) · bit6 v3 (runs) · bit7 deep
   if (/^https:\/\//i.test(s)) {
@@ -384,10 +385,10 @@ export async function decodePlainUrl(str) {
 // and "direct" wrappers for single-method links (the payload is encrypted
 // directly under the method's key — no wrap layer). Decoders also accept
 // s3. (verbose v3) and s4. (compact v4, IV-carrying).
-const WK = { pass: 'p', embed: 'e', prf: 'r', pub: 'u' };
-const WK_BACK = { p: 'pass', e: 'embed', r: 'prf', u: 'pub' };
-const WK_DIRECT = { pass: 'P', embed: 'E', prf: 'R', pub: 'U' };
-const WK_DIRECT_BACK = { P: 'pass', E: 'embed', R: 'prf', U: 'pub' };
+const WK = { pass: 'p', embed: 'e', prf: 'r', pub: 'u', pubx: 'w', pubc: 'c' };
+const WK_BACK = { p: 'pass', e: 'embed', r: 'prf', u: 'pub', w: 'pubx', c: 'pubc' };
+const WK_DIRECT = { pass: 'P', embed: 'E', prf: 'R', pub: 'U', pubx: 'W', pubc: 'C' };
+const WK_DIRECT_BACK = { P: 'pass', E: 'embed', R: 'prf', U: 'pub', W: 'pubx', C: 'pubc' };
 
 function compactEnvelope(env) {
   const out = { v: COMPACT_VERSION, t: env.t };
@@ -417,10 +418,8 @@ function compactEnvelope(env) {
       }
     }
     if (w.k === 'prf') c.q = w.cid;
-    if (w.k === 'pub') {
-      c.x = w.x;
-      c.y = w.m;
-    }
+    if (w.k === 'pub' || w.k === 'pubc') c.x = w.x;
+    if (w.k === 'pub' || w.k === 'pubx') c.y = w.m;
     if (w.xi != null) c.i = w.xi;
     return c;
   });
@@ -482,11 +481,18 @@ function expandCompact(c, version) {
 //                 + [48 ct unless direct]
 //     prf: 32 salt + u8 cidLen + cid + [32 ct unless direct]
 //     pub: 32 x + 1088 mlkem + [48 ct unless direct]
+//     pubx (X-Wing): 1120 kem-ct + [48 ct unless direct]
+//     pubc (X25519): 32 x + [48 ct unless direct]
 //     + [u8 xi if thr]
 //   u16 payloadLen + payload ciphertext
-const KIND_NUM = { pass: 0, embed: 1, prf: 2, pub: 3 };
-const KIND_BACK = ['pass', 'embed', 'prf', 'pub'];
+// Kind is bits0-2 (0–5 in use); bit7 = direct. Kinds 4/5 postdate the
+// original 2-bit field — old decoders misread them and fail closed
+// (garbage lengths → truncation or GCM failure, never a wrong answer).
+const KIND_NUM = { pass: 0, embed: 1, prf: 2, pub: 3, pubx: 4, pubc: 5 };
+const KIND_BACK = ['pass', 'embed', 'prf', 'pub', 'pubx', 'pubc'];
 const MLKEM_CT_LEN = 1088;
+const XWING_CT_LEN = 1120; // mlkem ct (1088) || x25519 eph pub (32)
+const XWING_PK_LEN = 1216; // mlkem pk (1184) || x25519 pub (32)
 
 function numBytes(n, len) {
   const out = new Array(len);
@@ -632,6 +638,12 @@ function binaryEncode(env) {
       pushBytes(out, fieldBytes(w.x, 32, 'ephemeral public key'));
       pushBytes(out, fieldBytes(w.m, MLKEM_CT_LEN, 'ML-KEM ciphertext'));
       if (!w.direct) pushBytes(out, fieldBytes(w.ct, 48, 'wrapped key'));
+    } else if (w.k === 'pubx') {
+      pushBytes(out, fieldBytes(w.m, XWING_CT_LEN, 'X-Wing ciphertext'));
+      if (!w.direct) pushBytes(out, fieldBytes(w.ct, 48, 'wrapped key'));
+    } else if (w.k === 'pubc') {
+      pushBytes(out, fieldBytes(w.x, 32, 'ephemeral public key'));
+      if (!w.direct) pushBytes(out, fieldBytes(w.ct, 48, 'wrapped key'));
     }
     if (env.thr) {
       if (!Number.isInteger(w.xi) || w.xi < 1 || w.xi > 255) {
@@ -711,7 +723,8 @@ function binaryDecode(bytes) {
   for (let i = 0; i < wc; i++) {
     const b = r.u8();
     const direct = !!(b & 128);
-    const kind = KIND_BACK[b & 3];
+    const kind = KIND_BACK[b & 7];
+    if (!kind) throw new SealError('malformed link: unknown unlock method');
     const w = { k: kind };
     if (direct) w.direct = true;
     if (kind === 'pass' || kind === 'embed') {
@@ -726,6 +739,12 @@ function binaryDecode(bytes) {
       w.s = bytesToB64u(r.bytes(32));
       w.cid = bytesToB64u(r.bytes(r.u8()));
       if (!direct) w.ct = bytesToB64u(r.bytes(32));
+    } else if (kind === 'pubx') {
+      w.m = bytesToB64u(r.bytes(XWING_CT_LEN));
+      if (!direct) w.ct = bytesToB64u(r.bytes(48));
+    } else if (kind === 'pubc') {
+      w.x = bytesToB64u(r.bytes(32));
+      if (!direct) w.ct = bytesToB64u(r.bytes(48));
     } else {
       w.x = bytesToB64u(r.bytes(32));
       w.m = bytesToB64u(r.bytes(MLKEM_CT_LEN));
@@ -751,7 +770,7 @@ export async function encodeEnvelope(env, opts = {}) {
 // Post-decode sanity: every decoding path (JSON v3, compact v4/v5, binary v6)
 // funnels through here so a malformed envelope fails closed with a friendly
 // SealError instead of a stray TypeError three functions later.
-const KNOWN_KINDS = new Set(['pass', 'embed', 'prf', 'pub']);
+const KNOWN_KINDS = new Set(['pass', 'embed', 'prf', 'pub', 'pubx', 'pubc']);
 function validateEnvelope(env) {
   if (!env || typeof env !== 'object') throw new SealError('malformed link');
   if (env.t !== 'url' && env.t !== 'text') throw new SealError('malformed link: bad payload type');
@@ -858,6 +877,14 @@ function canonicalWrap(w) {
     out.x = w.x;
     out.m = w.m;
     if (!w.direct) out.ct = w.ct;
+  } else if (w.k === 'pubx') {
+    out.alg = 'xwing';
+    out.m = w.m;
+    if (!w.direct) out.ct = w.ct;
+  } else if (w.k === 'pubc') {
+    out.alg = 'x25519';
+    out.x = w.x;
+    if (!w.direct) out.ct = w.ct;
   }
   if (w.xi != null) out.xi = w.xi;
   return out;
@@ -892,32 +919,117 @@ async function wrapCredential(c, keyBytes, kdf) {
     const { first, credentialId } = await enrollPasskey(s);
     return { k: 'prf', cid: bytesToB64u(credentialId), s: bytesToB64u(s), ct: bytesToB64u(xorBytes(first, keyBytes)) };
   }
-  if (c.k === 'pub') {
-    const { x25519Pub, mlkemPub } = normalizeRecipient(c.recipient);
-    const eph = await crypto.subtle.generateKey({ name: 'X25519' }, true, ['deriveBits']);
-    const ephPub = new Uint8Array(await crypto.subtle.exportKey('raw', eph.publicKey));
-    const ssX = new Uint8Array(
-      await crypto.subtle.deriveBits(
-        { name: 'X25519', public: await importX25519Public(b64uToBytes(x25519Pub)) },
-        eph.privateKey,
-        256
-      )
-    );
-    const { ml_kem768 } = await import('@noble/post-quantum/ml-kem.js');
-    const enc = await ml_kem768.encapsulate(b64uToBytes(mlkemPub));
-    const ssM = new Uint8Array(enc.sharedSecret);
-    const ctKem = new Uint8Array(enc.cipherText);
-    const combined = await sha256(concatBytes(toBytes('x25519'), ssX, toBytes('mlkem768'), ssM));
-    const key = await importAesKey(combined);
+  if (c.k === 'pub' || c.k === 'pubx' || c.k === 'pubc') {
+    const { key, fields, alg } = await pubEncapsulate(c.k, c.recipient);
     return {
-      k: 'pub',
-      alg: 'hybrid-x25519-mlkem768',
-      x: bytesToB64u(ephPub),
-      m: bytesToB64u(ctKem),
+      k: c.k,
+      alg,
+      ...fields,
       ct: bytesToB64u(await aesEncryptNoIv(key, keyBytes)),
     };
   }
   throw new SealError(`unknown credential kind: ${c.k}`);
+}
+
+// Recipient encapsulation, three algorithms in one wire family:
+//   pub  — legacy hybrid: X25519 ECDH + ML-KEM-768, SHA-256 combiner
+//          (kept so every existing recipient link still seals and opens)
+//   pubx — X-Wing (draft-connolly-cfrg-xwing-kem): ML-KEM-768 + X25519
+//          with the standardized SHA3-256 combiner. The 1120-byte
+//          ciphertext already carries the ephemeral X25519 key.
+//   pubc — classical X25519 alone: no post-quantum floor, but a 32-byte
+//          wrap instead of 1120 — keypair links shrink ~6x.
+async function pubEncapsulate(kind, recipient) {
+  const r = normalizeRecipient(recipient);
+  if (kind === 'pubx') {
+    if (!r.xwingPub) throw new SealError('recipient key file has no X-Wing public key');
+    const { ml_kem768_x25519 } = await import('@noble/post-quantum/hybrid.js');
+    const enc = await ml_kem768_x25519.encapsulate(b64uToBytes(r.xwingPub));
+    return {
+      alg: 'xwing',
+      key: await importAesKey(new Uint8Array(enc.sharedSecret)),
+      fields: { m: bytesToB64u(new Uint8Array(enc.cipherText)) },
+    };
+  }
+  if (!r.x25519Pub) throw new SealError('recipient key file has no X25519 public key');
+  const { ephPub, ssX } = await x25519Ecdh(b64uToBytes(r.x25519Pub));
+  if (kind === 'pubc') {
+    const combined = await sha256(concatBytes(toBytes('mr-x25519'), ssX));
+    return { alg: 'x25519', key: await importAesKey(combined), fields: { x: bytesToB64u(ephPub) } };
+  }
+  if (!r.mlkemPub) throw new SealError('recipient key file has no ML-KEM public key');
+  const { ml_kem768 } = await import('@noble/post-quantum/ml-kem.js');
+  const enc = await ml_kem768.encapsulate(b64uToBytes(r.mlkemPub));
+  const combined = await sha256(concatBytes(toBytes('x25519'), ssX, toBytes('mlkem768'), new Uint8Array(enc.sharedSecret)));
+  return {
+    alg: 'hybrid-x25519-mlkem768',
+    key: await importAesKey(combined),
+    fields: { x: bytesToB64u(ephPub), m: bytesToB64u(new Uint8Array(enc.cipherText)) },
+  };
+}
+
+async function x25519Ecdh(peerPubBytes) {
+  const eph = await crypto.subtle.generateKey({ name: 'X25519' }, true, ['deriveBits']);
+  const ephPub = new Uint8Array(await crypto.subtle.exportKey('raw', eph.publicKey));
+  const ssX = new Uint8Array(
+    await crypto.subtle.deriveBits(
+      { name: 'X25519', public: await importX25519Public(peerPubBytes) },
+      eph.privateKey,
+      256
+    )
+  );
+  return { ephPub, ssX };
+}
+
+// Wrap key from a pub-family wrapper + the recipient's private keyfile.
+async function pubDecapsulate(w, priv) {
+  if (w.k === 'pubx') {
+    const ct = b64uToBytes(w.m);
+    let ss;
+    if (priv.xwingSeed) {
+      const { ml_kem768_x25519 } = await import('@noble/post-quantum/hybrid.js');
+      ss = new Uint8Array(await ml_kem768_x25519.decapsulate(ct, priv.xwingSeed));
+    } else {
+      // Keyfile carries expanded keys rather than the 32-byte root seed —
+      // run the X-Wing combiner by hand (identical output by construction).
+      if (!priv.mlkemPriv || !priv.x25519Key || !priv.x25519PubBytes) {
+        throw new SealError('key file cannot open an X-Wing link');
+      }
+      const { ml_kem768 } = await import('@noble/post-quantum/ml-kem.js');
+      const { sha3_256 } = await import('@noble/hashes/sha3.js');
+      const ssM = new Uint8Array(await ml_kem768.decapsulate(ct.subarray(0, MLKEM_CT_LEN), priv.mlkemPriv));
+      const ssX = new Uint8Array(
+        await crypto.subtle.deriveBits(
+          { name: 'X25519', public: await importX25519Public(ct.subarray(MLKEM_CT_LEN)) },
+          priv.x25519Key,
+          256
+        )
+      );
+      ss = new Uint8Array(sha3_256(concatBytes(ssM, ssX, ct.subarray(MLKEM_CT_LEN), priv.x25519PubBytes, toBytes('\\.//^\\'))));
+    }
+    return importAesKey(ss);
+  }
+  if (w.k === 'pubc') {
+    const ssX = new Uint8Array(
+      await crypto.subtle.deriveBits(
+        { name: 'X25519', public: await importX25519Public(b64uToBytes(w.x)) },
+        priv.x25519Key,
+        256
+      )
+    );
+    return importAesKey(await sha256(concatBytes(toBytes('mr-x25519'), ssX)));
+  }
+  const ssX = new Uint8Array(
+    await crypto.subtle.deriveBits(
+      { name: 'X25519', public: await importX25519Public(b64uToBytes(w.x)) },
+      priv.x25519Key,
+      256
+    )
+  );
+  const { ml_kem768 } = await import('@noble/post-quantum/ml-kem.js');
+  const ssM = new Uint8Array(await ml_kem768.decapsulate(b64uToBytes(w.m), priv.mlkemPriv));
+  const combined = await sha256(concatBytes(toBytes('x25519'), ssX, toBytes('mlkem768'), ssM));
+  return importAesKey(combined);
 }
 
 async function tryUnwrap(w, creds, noIv) {
@@ -945,16 +1057,10 @@ async function tryUnwrap(w, creds, noIv) {
       const first = await (creds.prfAssertion ? creds.prfAssertion(w) : assertPasskey(w));
       if (!first) return null;
       bytes = xorBytes(first, b64uToBytes(w.ct));
-    } else if (w.k === 'pub') {
+    } else if (w.k === 'pub' || w.k === 'pubx' || w.k === 'pubc') {
       if (!creds.privateKeys) return null;
-      const { x25519Key, mlkemPriv } = await normalizePrivate(creds.privateKeys);
-      const ssX = new Uint8Array(
-        await crypto.subtle.deriveBits({ name: 'X25519', public: await importX25519Public(b64uToBytes(w.x)) }, x25519Key, 256)
-      );
-      const { ml_kem768 } = await import('@noble/post-quantum/ml-kem.js');
-      const ssM = new Uint8Array(await ml_kem768.decapsulate(b64uToBytes(w.m), mlkemPriv));
-      const combined = await sha256(concatBytes(toBytes('x25519'), ssX, toBytes('mlkem768'), ssM));
-      const key = await importAesKey(combined);
+      const priv = await normalizePrivate(creds.privateKeys);
+      const key = await pubDecapsulate(w, priv);
       bytes = await decrypt(key, b64uToBytes(w.ct));
     }
     return bytes ? { x: w.xi ?? 0, bytes } : null;
@@ -986,16 +1092,10 @@ async function deriveDirectKeys(w, creds) {
       const first = await (creds.prfAssertion ? creds.prfAssertion(w) : assertPasskey(w));
       return first ? [await importAesKey(first)] : [];
     }
-    if (w.k === 'pub') {
+    if (w.k === 'pub' || w.k === 'pubx' || w.k === 'pubc') {
       if (!creds.privateKeys) return [];
-      const { x25519Key, mlkemPriv } = await normalizePrivate(creds.privateKeys);
-      const ssX = new Uint8Array(
-        await crypto.subtle.deriveBits({ name: 'X25519', public: await importX25519Public(b64uToBytes(w.x)) }, x25519Key, 256)
-      );
-      const { ml_kem768 } = await import('@noble/post-quantum/ml-kem.js');
-      const ssM = new Uint8Array(await ml_kem768.decapsulate(b64uToBytes(w.m), mlkemPriv));
-      const combined = await sha256(concatBytes(toBytes('x25519'), ssX, toBytes('mlkem768'), ssM));
-      return [await importAesKey(combined)];
+      const priv = await normalizePrivate(creds.privateKeys);
+      return [await pubDecapsulate(w, priv)];
     }
   } catch (e) {
     if (isCancelError(e)) throw e; // "user cancelled" is not "wrong credential"
@@ -1063,48 +1163,105 @@ async function assertPasskey(w) {
 
 // ------------------------------------------------------------ keypairs
 
-export async function generateRecipientKeypair() {
-  const x25519 = await crypto.subtle.generateKey({ name: 'X25519' }, true, ['deriveBits']);
-  const { ml_kem768 } = await import('@noble/post-quantum/ml-kem.js');
-  const kem = await ml_kem768.keygen();
+// Key file v2 (default): X-Wing — the standardized ML-KEM-768+X25519 hybrid
+// (draft-connolly-cfrg-xwing-kem). `seed` is the 32-byte decapsulation root
+// (SECRET); `pub` is the 1216-byte public key to hand out. The X25519 child
+// keypair is derived (shake256(seed,96)[64:96]) and stored too, so the same
+// file also opens classical-only links. v1 files (separate x25519+mlkem
+// keypairs, legacy combiner) still open links and still seal as 'pub'.
+export async function generateRecipientKeypair(opts = {}) {
+  if (opts.classical) {
+    // Classical-only: X25519 alone. Shorter links, no post-quantum floor.
+    const x25519 = await crypto.subtle.generateKey({ name: 'X25519' }, true, ['deriveBits']);
+    return {
+      v: 2,
+      alg: 'x25519',
+      x25519: {
+        pub: bytesToB64u(new Uint8Array(await crypto.subtle.exportKey('raw', x25519.publicKey))),
+        priv: bytesToB64u(new Uint8Array(await crypto.subtle.exportKey('pkcs8', x25519.privateKey))),
+      },
+    };
+  }
+  const { ml_kem768_x25519 } = await import('@noble/post-quantum/hybrid.js');
+  const { shake256 } = await import('@noble/hashes/sha3.js');
+  const kp = await ml_kem768_x25519.keygen();
+  const pub = new Uint8Array(kp.publicKey);
+  const seed = new Uint8Array(kp.secretKey);
+  // X-Wing expands the 32-byte root seed as shake256(seed, 96): bytes 0-64
+  // feed ML-KEM-768 keygen, bytes 64-96 are the X25519 secret scalar.
+  const xPriv = shake256(seed, { dkLen: 96 }).slice(64);
+  const xPub = pub.slice(1184);
+  const jwk = {
+    kty: 'OKP',
+    crv: 'X25519',
+    d: bytesToB64u(xPriv), // JWK fields are base64url — same alphabet as b64u
+    x: bytesToB64u(xPub),
+  };
+  const xKey = await crypto.subtle.importKey('jwk', jwk, { name: 'X25519' }, true, ['deriveBits']);
   return {
-    v: 1,
-    alg: 'hybrid-x25519-mlkem768',
+    v: 2,
+    alg: 'xwing',
+    seed: bytesToB64u(seed),
+    pub: bytesToB64u(pub),
     x25519: {
-      pub: bytesToB64u(new Uint8Array(await crypto.subtle.exportKey('raw', x25519.publicKey))),
-      priv: bytesToB64u(new Uint8Array(await crypto.subtle.exportKey('pkcs8', x25519.privateKey))),
-    },
-    mlkem: {
-      pub: bytesToB64u(new Uint8Array(kem.publicKey)),
-      priv: bytesToB64u(new Uint8Array(kem.secretKey)),
+      pub: bytesToB64u(xPub),
+      priv: bytesToB64u(new Uint8Array(await crypto.subtle.exportKey('pkcs8', xKey))),
     },
   };
 }
 
+// Recipient public material → {xwingPub?, x25519Pub?, mlkemPub?}.
+// v2 xwing files: `pub` (1216B, mlkem pk || x25519 pk — the tail doubles as
+// the classical public key). v1 files: separate x25519.pub + mlkem.pub.
+// v2 x25519 files: x25519.pub only (classical links).
 export function normalizeRecipient(recipient) {
   const r = typeof recipient === 'string' ? JSON.parse(recipient) : recipient;
-  const x25519Pub = r.x25519?.pub ?? r.x25519Pub;
-  const mlkemPub = r.mlkem?.pub ?? r.mlkemPub;
-  if (!x25519Pub || !mlkemPub) throw new SealError('recipient needs x25519.pub and mlkem.pub');
-  return { x25519Pub, mlkemPub };
+  const out = {};
+  const xw = r.xwing?.pub ?? (r.alg === 'xwing' ? r.pub : null);
+  if (xw) {
+    const b = b64uToBytes(xw);
+    if (b.length !== XWING_PK_LEN) {
+      throw new SealError(`X-Wing public key must be ${XWING_PK_LEN} bytes, got ${b.length}`);
+    }
+    out.xwingPub = xw;
+    out.x25519Pub = bytesToB64u(b.slice(1184));
+  }
+  if (r.x25519?.pub ?? r.x25519Pub) out.x25519Pub = r.x25519?.pub ?? r.x25519Pub;
+  if (r.mlkem?.pub ?? r.mlkemPub) out.mlkemPub = r.mlkem?.pub ?? r.mlkemPub;
+  if (!out.xwingPub && !out.x25519Pub && !out.mlkemPub) {
+    throw new SealError('recipient needs a public key (xwing pub, or x25519.pub [+ mlkem.pub])');
+  }
+  return out;
 }
 
 async function importX25519Public(bytes) {
   return crypto.subtle.importKey('raw', bytes, { name: 'X25519' }, false, []);
 }
 
+// Private key material → {xwingSeed?, x25519Key?, x25519PubBytes?, mlkemPriv?}.
+// xwingSeed alone opens X-Wing links; the expanded fields open them too via
+// the manual combiner and also open pubc/pub links.
 async function normalizePrivate(priv) {
-  if (priv.x25519Key && priv.mlkemPriv) return priv;
+  if (priv.x25519Key || priv.xwingSeed) return priv;
   const r = typeof priv === 'string' ? JSON.parse(priv) : priv;
-  const x25519Key = await crypto.subtle.importKey(
-    'pkcs8',
-    b64uToBytes(r.x25519?.priv ?? r.x25519Priv),
-    { name: 'X25519' },
-    false,
-    ['deriveBits']
-  );
-  const mlkemPriv = b64uToBytes(r.mlkem?.priv ?? r.mlkemPriv);
-  return { x25519Key, mlkemPriv };
+  const out = {};
+  const seed = r.seed ?? r.xwing?.seed;
+  if (seed) out.xwingSeed = b64uToBytes(seed);
+  const xpub = r.x25519?.pub ?? r.x25519Pub;
+  if (xpub) out.x25519PubBytes = b64uToBytes(xpub);
+  const xpriv = r.x25519?.priv ?? r.x25519Priv;
+  if (xpriv) {
+    out.x25519Key = await crypto.subtle.importKey(
+      'pkcs8',
+      b64uToBytes(xpriv),
+      { name: 'X25519' },
+      false,
+      ['deriveBits']
+    );
+  }
+  const mpriv = r.mlkem?.priv ?? r.mlkemPriv;
+  if (mpriv) out.mlkemPriv = b64uToBytes(mpriv);
+  return out;
 }
 
 // ------------------------------------------------------------ identities
@@ -1206,7 +1363,7 @@ export async function verifySignatures(env) {
 export async function seal(opts = {}) {
   const {
     type = 'url',
-    data,
+    data: rawData,
     passwords = [],
     embedded = null,
     recipient = null,
@@ -1219,7 +1376,15 @@ export async function seal(opts = {}) {
     signer = null,
     pq = false,
     preview = false,
+    strip = true,
+    classical = false,
   } = opts;
+
+  // Tracking parameters are stripped by default BEFORE encryption —
+  // utm_*, fbclid, gclid & friends are high-entropy bytes that can't
+  // compress and only exist to follow the recipient. `strip: false` keeps
+  // the destination byte-for-byte identical.
+  const data = type === 'url' && strip ? stripTrackingParams(rawData).url : rawData;
 
   if (!data) throw new SealError('seal: data is required');
   if (type === 'url' && !/^https?:\/\//i.test(String(data))) {
@@ -1231,7 +1396,13 @@ export async function seal(opts = {}) {
   if (embeddedPw != null) creds.push({ k: 'embed', password: embeddedPw });
   for (const p of passwords) creds.push({ k: 'pass', password: String(p) });
   if (prf) creds.push({ k: 'prf' });
-  if (recipient) creds.push({ k: 'pub', recipient });
+  if (recipient) {
+    const r = normalizeRecipient(recipient);
+    // classical forces the short X25519-only wrap; otherwise the newest
+    // algorithm the key file supports wins (xwing → legacy hybrid → x25519).
+    const k = classical ? 'pubc' : r.xwingPub ? 'pubx' : r.mlkemPub ? 'pub' : 'pubc';
+    creds.push({ k, recipient });
+  }
   if (!creds.length) throw new SealError('seal: at least one unlock method required');
 
   const K = randomBytes(32);
@@ -1277,28 +1448,10 @@ export async function seal(opts = {}) {
       const { first, credentialId } = await enrollPasskey(s);
       key = await importAesKey(first);
       env.wrap.push({ k: 'prf', direct: true, cid: bytesToB64u(credentialId), s: bytesToB64u(s) });
-    } else if (c.k === 'pub') {
-      const { x25519Pub, mlkemPub } = normalizeRecipient(c.recipient);
-      const eph = await crypto.subtle.generateKey({ name: 'X25519' }, true, ['deriveBits']);
-      const ephPub = new Uint8Array(await crypto.subtle.exportKey('raw', eph.publicKey));
-      const ssX = new Uint8Array(
-        await crypto.subtle.deriveBits(
-          { name: 'X25519', public: await importX25519Public(b64uToBytes(x25519Pub)) },
-          eph.privateKey,
-          256
-        )
-      );
-      const { ml_kem768 } = await import('@noble/post-quantum/ml-kem.js');
-      const enc = await ml_kem768.encapsulate(b64uToBytes(mlkemPub));
-      const combined = await sha256(concatBytes(toBytes('x25519'), ssX, toBytes('mlkem768'), new Uint8Array(enc.sharedSecret)));
-      key = await importAesKey(combined);
-      env.wrap.push({
-        k: 'pub',
-        direct: true,
-        alg: 'hybrid-x25519-mlkem768',
-        x: bytesToB64u(ephPub),
-        m: bytesToB64u(new Uint8Array(enc.cipherText)),
-      });
+    } else if (c.k === 'pub' || c.k === 'pubx' || c.k === 'pubc') {
+      const { key: pk, fields, alg } = await pubEncapsulate(c.k, c.recipient);
+      key = pk;
+      env.wrap.push({ k: c.k, direct: true, alg, ...fields });
     }
     env.payload = { ct: bytesToB64u(await aesEncryptNoIv(key, await preparePayload(type, data))) };
     if (signer) await signEnvelope(env, signer, { pq });

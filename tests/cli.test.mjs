@@ -55,7 +55,7 @@ test('cli: recipient keypair round trip', async () => {
     const keyfile = join(dir, 'seal-key.json');
     await run(process.execPath, [CLI, 'keygen', '--recipient', '--out', keyfile], { timeout: 60000 });
     const kp = JSON.parse(readFileSync(keyfile, 'utf8'));
-    assert.ok(kp.x25519.priv && kp.mlkem.priv);
+    assert.ok(kp.alg === 'xwing' && kp.seed && kp.pub && kp.x25519.priv);
 
     const { fragment } = await sealCli('--url', URL_TARGET, '--recipient', keyfile);
     const wrongDir = mkdtempSync(join(tmpdir(), 'seal-cli-wrong-'));

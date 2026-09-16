@@ -31,6 +31,8 @@
       "hash-wasm": "/vendor/hash-wasm.js",
       "@noble/post-quantum/ml-kem.js": "/vendor/noble-pq.js",
       "@noble/post-quantum/ml-dsa.js": "/vendor/noble-pq.js",
+      "@noble/post-quantum/hybrid.js": "/vendor/noble-pq.js",
+      "@noble/hashes/sha3.js": "/vendor/noble-pq.js",
       "qrcode": "/vendor/qrcode.js"
     }
   }
@@ -187,6 +189,10 @@
           <label class="field"><span class="field-label">Recipient's public key file</span>
             <input id="adv-pub-file" type="file" accept=".json,application/json"></label>
           <button type="button" id="gen-keypair" class="text-btn">Generate a key pair for someone</button>
+          <label class="switch-row">
+            <span class="switch-copy"><strong>Classical-only (X25519)</strong><small>Link shrinks ~6× (about 90 characters), but gives up post-quantum resistance — a quantum computer could someday open it. The same key file opens it.</small></span>
+            <input type="checkbox" id="adv-pub-classical"><span class="switch"></span>
+          </label>
         </div>
 
         <label class="switch-row">
@@ -255,6 +261,10 @@
 
       <div class="panel">
         <h2>Link style</h2>
+        <label class="switch-row">
+          <span class="switch-copy"><strong>Strip tracking parameters</strong><small>Removes utm_*, fbclid, gclid and ~300 other trackers from the destination before encrypting — shorter links, less surveillance. On by default.</small></span>
+          <input type="checkbox" id="adv-strip" checked><span class="switch"></span>
+        </label>
         <label class="switch-row">
           <span class="switch-copy"><strong>Short link — no encryption</strong><small>Compresses the destination into the link — a win for long URLs, but anything under ~100 characters is better shared as-is (the router's own address adds length). Anyone with the link can read and open it.</small></span>
           <input type="checkbox" id="adv-plain"><span class="switch"></span>

@@ -25,10 +25,14 @@ that does and does not buy you.
   `PRF(salt)` from the authenticator. The link never contains the credential's public
   key, so Shor's algorithm has no target. Requires an authenticator with PRF support
   (Chrome 116+, Safari 17.4+, Firefox 128+).
-- **Recipient keypairs:** hybrid X25519 + ML-KEM-768. The payload key is wrapped under
-  `SHA-256("x25519" ‖ X25519_ss ‖ "mlkem768" ‖ ML-KEM_ss)`; the link embeds an ephemeral
-  X25519 public key and an ML-KEM ciphertext. Breaking it requires breaking BOTH the
-  classical and the post-quantum primitive.
+- **Recipient keypairs:** X-Wing (draft-connolly-cfrg-xwing-kem) — ML-KEM-768 + X25519
+  combined with the standardized `SHA3-256(ss_m ‖ ss_x ‖ ct_x ‖ pk_x ‖ label)` KEM.
+  The link carries the 1120-byte X-Wing ciphertext (which embeds the ephemeral X25519
+  key). Breaking it requires breaking BOTH the classical and the post-quantum
+  primitive. Two alternatives exist, both opt-in: the legacy `pub` hybrid
+  (SHA-256 combiner) is still produced for v1 key files, and a classical-only
+  X25519 wrap (`pubc`) shrinks links ~6× at the cost of post-quantum resistance —
+  explicitly labeled in the UI and CLI.
 - **Signatures:** Ed25519 and ML-DSA-65 over a canonical serialization of the envelope
   (fixed field order, signatures excluded). Both must not verify for a forged claim to
   be believed in a hybrid-verifying client.
@@ -77,7 +81,13 @@ that does and does not buy you.
 - **Embedded-password links are credentials.** Anyone holding the link holds the key.
   They are obfuscation, clearly labeled as such in the UI.
 - **No forward secrecy for keypair links** — a future break of both X25519 *and*
-  ML-KEM-768 retroactively decrypts. The hybrid design is the hedge.
+  ML-KEM-768 retroactively decrypts. The hybrid design is the hedge. Classical-only
+  (X25519) wraps have no such hedge — that trade is the price of a ~90-character
+  keypair link and is always opt-in.
+- **Tracker stripping is a blocklist.** The ~300-name list (distilled from the
+  AdGuard URL Tracking filter plus per-host rules) can only *under*-strip: a miss
+  leaves a tracker in place, it can never remove a functional parameter it doesn't
+  know. Disable it if a destination needs its tracking params.
 - **The page is JavaScript.** You must trust the code you loaded — which is why the
   whole product is auditable in a coffee break: one HTML file, one JS app, one small
   worker, no CDN, no remote scripts, and a strict CSP. Pin and audit it.

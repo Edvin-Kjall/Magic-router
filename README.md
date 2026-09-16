@@ -23,11 +23,14 @@ you                      the link                          the server
   - 🔑 **Password** — Argon2id memory-hard derivation (64 MiB, 3 passes)
   - 🔓 **Embedded password** — auto-open links (documented as obfuscation: the link *is* the credential)
   - 🪪 **Passkey** — WebAuthn PRF extension (Touch ID / Windows Hello / Android)
-  - 🗝️ **Recipient keypair** — hybrid **X25519 + ML-KEM-768** (post-quantum)
+  - 🗝️ **Recipient keypair** — **X-Wing** (ML-KEM-768 + X25519, the standardized hybrid KEM); optional classical-only X25519 wrap for ~6× shorter links
 - **m-of-n thresholds** — Shamir-secret-shared key; "needs 2 of 3 credentials".
 - **Time-locks** — RSW puzzle (`2^(2^n) mod N`): the wait is bound to the key itself, not a skippable timer (see SECURITY).
 - **Signed seals** — Ed25519 + ML-DSA-65 hybrid signatures; "Sealed by Alice ✅".
 - **Secret text**, not just URLs — tokens, API keys, messages.
+- **Tracker stripping** — ~300 tracking params (utm_*, fbclid, gclid, per-host Amazon/X/TikTok/…
+  rules, distilled from the AdGuard list) removed before encryption; shorter *and* more
+  private. On by default, one toggle to keep them.
 - **Confirm screen + Google Safe Browsing check** — anti-phishing by design, with an
   optional destination preview (Advanced toggle, off by default — the destination
   stays fully encrypted).
@@ -71,7 +74,7 @@ npx seal create --url https://example.com/private --password "correct horse" --h
 npx seal create --text "$API_KEY" --embed "pw" --delay 2h --sign alice.json
 npx seal create --url https://x --password a --password b --threshold 2 --qr
 npx seal open 'https://your-host.workers.dev/#s6.…' --password "correct horse"
-npx seal keygen --recipient      # → seal-key.json (hybrid X25519 + ML-KEM-768)
+npx seal keygen --recipient      # → seal-key.json (X-Wing hybrid: ML-KEM-768 + X25519)
 npx seal keygen --identity alice # → seal-identity-alice.json
 npx seal create --url https://x --password pw --host https://h --store --burn  # hosted /s/ link (premium)
 npx seal open https://h/s/<slug> --password pw    # hosted links open directly
@@ -86,7 +89,7 @@ CLI links open in the browser and vice versa — one format everywhere.
 1. **Sealing** (browser): a random 256-bit payload key K encrypts the destination
    (AES-256-GCM). K is then wrapped once per unlock method — e.g. encrypted under a
    key derived from the password (Argon2id), XORed with a passkey PRF output, or
-   encapsulated to a hybrid X25519+ML-KEM-768 public key. The whole envelope is
+   encapsulated to an X-Wing (ML-KEM-768 + X25519) public key. The whole envelope is
    compressed, base64url-encoded, and appended to the URL as `#s6.…` (a compact
    binary envelope; older `s3.`–`s5.` links still decode).
 2. **Opening**: the page reads the fragment, asks for the credential(s), unwraps K
@@ -104,7 +107,7 @@ button generates ~103-bit ones).
 | Component | Status |
 |---|---|
 | Encryption | AES-256-GCM — NIST post-quantum adequate (Grover: ~2¹²⁸) |
-| Keypairs | Hybrid X25519 + ML-KEM-768 — needs classical *and* quantum breaks |
+| Keypairs | X-Wing (ML-KEM-768 + X25519, draft-connolly-cfrg-xwing-kem) — needs classical *and* quantum breaks; optional classical X25519 wrap trades PQ for ~6× shorter links |
 | Signatures | Ed25519 + ML-DSA-65 hybrid |
 | Password hashing | Argon2id memory-hardness (raises cost per guess for any attacker) |
 

@@ -26,6 +26,7 @@ import {
 import { estimateHashRate, estimateSquaringRate, formatDuration, getRswModulus } from './lib/timelock.js';
 import { toCanvas } from 'qrcode';
 import { ensureDeepDict } from './lib/dict.js';
+import { stripTrackingParams } from './lib/trackers.js';
 
 const CFG = {
   repo: 'https://github.com/Edvin-Kjall/Magic-router',
@@ -138,7 +139,7 @@ async function generatePassphrase(words = 8) {
 function activeAdvanced() {
   const out = [];
   if ($('adv-prf').checked) out.push('Passkey');
-  if ($('adv-pub').checked) out.push('Recipient key');
+  if ($('adv-pub').checked) out.push('Recipient key' + ($('adv-pub-classical').checked ? ' (X25519)' : ''));
   if ($('adv-pw2').checked) out.push('Second password');
   if ($('adv-thr').checked) out.push('Require all');
   if ($('adv-embed').checked) out.push('Auto-open');
@@ -150,6 +151,7 @@ function activeAdvanced() {
   if ($('adv-preview').checked) out.push('Preview');
   if ($('adv-plain').checked) out.push('Short (no encryption)');
   if ($('adv-burn').checked) out.push('Burn after read');
+  if (!$('adv-strip').checked) out.push('Keep trackers');
   return out;
 }
 
@@ -165,9 +167,10 @@ function updateAdvancedSummary() {
 }
 
 function clearAdvanced() {
-  for (const id of ['adv-prf', 'adv-pub', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-sign-pq', 'adv-path', 'adv-preview', 'adv-plain', 'adv-burn']) {
+  for (const id of ['adv-prf', 'adv-pub', 'adv-pub-classical', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-sign-pq', 'adv-path', 'adv-preview', 'adv-plain', 'adv-burn']) {
     $(id).checked = false;
   }
+  $('adv-strip').checked = true; // stripping is the default, not an "advanced on" item
   $('adv-timelock').value = 'off';
   $('adv-expiry').value = '';
   $('adv-note').value = '';
@@ -223,8 +226,10 @@ function buildSealOpts() {
     const f = $('adv-pub-file').files?.[0];
     if (!f) throw new SealError('Recipient key is on — pick their public key file (Advanced tab).');
     opts.recipient = f;
+    if ($('adv-pub-classical').checked) opts.classical = true;
     methodCount++;
   }
+  opts.strip = $('adv-strip').checked;
   if (passwords.length) opts.passwords = passwords;
   if (!methodCount) throw new SealError('Add a password first — or use Advanced for passkeys and keys.');
 
@@ -248,15 +253,16 @@ async function onCreate(e) {
     if ($('adv-plain').checked) {
       const raw = $('payload').value.trim();
       if (!/^https?:\/\//i.test(raw)) throw new SealError('Short mode needs a URL — it must start with https://');
-      const full = await encodePlainUrl(raw);
+      const stripRes = $('adv-strip').checked ? stripTrackingParams(raw) : { url: raw, removed: [] };
+      const full = await encodePlainUrl(stripRes.url, { strip: false });
       // encodePlainUrl returns the URL itself when compression can't win —
       // never wrap a non-link in the router prefix in that case. Raw-mode
       // (u0.) results contain path characters, so they only ever use the
       // fragment form.
-      const isLink = full !== raw;
+      const isLink = full !== stripRes.url;
       const isRaw = full.startsWith('u0.');
       const linkUrl = !isLink || isRaw
-        ? (!isLink ? raw : `${location.origin}/#${full}`)
+        ? (!isLink ? stripRes.url : `${location.origin}/#${full}`)
         : $('adv-path').checked
           ? `${location.origin}/_u/${full}`
           : `${location.origin}/#${full}`;
@@ -267,11 +273,11 @@ async function onCreate(e) {
       } else if (!isLink) {
         $('result-hint').textContent =
           'No compression win: this URL would only get longer as a link, so here it is unchanged. Sharing it directly is the shortest possible form.';
-      } else if (linkUrl.length >= raw.length) {
+      } else if (linkUrl.length >= stripRes.url.length) {
         // Honesty: the router's own host prefix means short destinations
         // are shorter on their own.
         $('result-hint').textContent =
-          `Your destination is already short (${raw.length} characters) — this link would be longer than just sharing the URL itself. No shortening service can beat a URL this small.`;
+          `Your destination is already short (${stripRes.url.length} characters) — this link would be longer than just sharing the URL itself. No shortening service can beat a URL this small.`;
       } else {
         $('result-hint').textContent =
           'This link is not encrypted — anyone with it can see and open the destination. Short, but no secrets.';
@@ -315,8 +321,12 @@ async function onCreate(e) {
       ? `${location.origin}/_u/${full}`
       : `${location.origin}/#${full}`;
     $('link-out').value = linkUrl;
+    const stripped = opts.type === 'url' && opts.strip !== false
+      ? stripTrackingParams(opts.data).removed
+      : [];
     $('result-hint').textContent =
-      'Share it however you like. Send the password separately — a different message or app is strongest.';
+      'Share it however you like. Send the password separately — a different message or app is strongest.' +
+      (stripped.length ? ` (Stripped ${stripped.length} tracking parameter${stripped.length === 1 ? '' : 's'}: ${stripped.slice(0, 5).join(', ')}${stripped.length > 5 ? '…' : ''}.)` : '');
 
     $('create-form').hidden = true;
     $('create-result').hidden = false;
@@ -782,7 +792,7 @@ function bindStatic() {
       const kp = await generateRecipientKeypair();
       download('seal-key.json', JSON.stringify(kp, null, 2));
       $('identity-status').textContent =
-        'Key pair downloaded. Give seal-key.json to the recipient; to seal TO them, upload the same file above.';
+        'Key pair downloaded (X-Wing hybrid — post-quantum, opens classical-only links too). Give seal-key.json to the recipient; to seal TO them, upload the same file above.';
     } catch (e2) {
       $('identity-status').textContent = '⚠ key generation failed in this browser';
     }

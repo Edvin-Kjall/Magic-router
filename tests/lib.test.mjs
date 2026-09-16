@@ -100,14 +100,105 @@ test('text payload (secrets, not URLs)', async () => {
   assert.equal(r.data, 'API_KEY_123456');
 });
 
-test('recipient keypair (hybrid X25519 + ML-KEM-768) roundtrip', async () => {
+test('recipient keypair (X-Wing hybrid) roundtrip', async () => {
   const kp = await generateRecipientKeypair();
+  assert.equal(kp.alg, 'xwing');
   const env = await seal({ type: 'url', data: URL, recipient: kp, kdf: KDF });
+  assert.equal(env.wrap[0].k, 'pubx');
   const str = await encodeEnvelope(env);
   // wrong keypair fails
   const kp2 = await generateRecipientKeypair();
   await assert.rejects(open(str, { privateKeys: kp2 }));
   // right keypair works
+  const r = await open(str, { privateKeys: kp });
+  assert.equal(r.data, URL);
+});
+
+test('legacy v1 keypair file still seals (pub) and opens', async () => {
+  // Simulate the v1 file format: separate x25519 + mlkem fields.
+  const x = await crypto.subtle.generateKey({ name: 'X25519' }, true, ['deriveBits']);
+  const { ml_kem768 } = await import('@noble/post-quantum/ml-kem.js');
+  const kem = await ml_kem768.keygen();
+  const v1 = {
+    v: 1,
+    alg: 'hybrid-x25519-mlkem768',
+    x25519: {
+      pub: bytesToB64u(new Uint8Array(await crypto.subtle.exportKey('raw', x.publicKey))),
+      priv: bytesToB64u(new Uint8Array(await crypto.subtle.exportKey('pkcs8', x.privateKey))),
+    },
+    mlkem: {
+      pub: bytesToB64u(new Uint8Array(kem.publicKey)),
+      priv: bytesToB64u(new Uint8Array(kem.secretKey)),
+    },
+  };
+  const env = await seal({ type: 'url', data: URL, recipient: v1, kdf: KDF });
+  assert.equal(env.wrap[0].k, 'pub'); // legacy combiner for a legacy file
+  const r = await open(await encodeEnvelope(env), { privateKeys: v1 });
+  assert.equal(r.data, URL);
+});
+
+test('classical-only wrap (pubc): ~6x shorter keypair link', async () => {
+  const kp = await generateRecipientKeypair(); // xwing file can do both
+  const env = await seal({ type: 'url', data: URL, recipient: kp, kdf: KDF, classical: true });
+  assert.equal(env.wrap[0].k, 'pubc');
+  const str = await encodeEnvelope(env);
+  const r = await open(str, { privateKeys: kp });
+  assert.equal(r.data, URL);
+  // wrong key fails
+  const kp2 = await generateRecipientKeypair();
+  await assert.rejects(open(str, { privateKeys: kp2 }));
+  // and it really is much shorter than the hybrid wrap
+  const hybrid = await encodeEnvelope(await seal({ type: 'url', data: URL, recipient: kp, kdf: KDF }));
+  assert.ok(str.length < hybrid.length / 3, `pubc ${str.length} vs pubx ${hybrid.length}`);
+});
+
+test('x25519-only key file: generates, seals, opens (pubc only)', async () => {
+  const kp = await generateRecipientKeypair({ classical: true });
+  assert.equal(kp.alg, 'x25519');
+  const env = await seal({ type: 'url', data: URL, recipient: kp, kdf: KDF });
+  assert.equal(env.wrap[0].k, 'pubc'); // no PQ material in the file → classical wrap
+  const r = await open(await encodeEnvelope(env), { privateKeys: kp });
+  assert.equal(r.data, URL);
+});
+
+test('pubx + pubc survive compact (s5.) and verbose (s3.) encodings', async () => {
+  const kp = await generateRecipientKeypair();
+  for (const classical of [false, true]) {
+    const env = await seal({ type: 'url', data: URL, recipient: kp, kdf: KDF, classical });
+    for (const legacy of [false, true]) {
+      const str = await encodeEnvelope(env, { legacy });
+      const r = await open(str, { privateKeys: kp });
+      assert.equal(r.data, URL);
+    }
+  }
+});
+
+test('pubx wrapped (non-direct) + threshold round-trip', async () => {
+  const kp = await generateRecipientKeypair();
+  // two methods → wrapped, not direct (password wraps first, keypair second)
+  const env = await seal({ type: 'url', data: URL, recipient: kp, passwords: ['pw'], kdf: KDF });
+  const pubW = env.wrap.find((w) => w.k === 'pubx');
+  assert.ok(pubW && !pubW.direct);
+  const str = await encodeEnvelope(env);
+  const r = await open(str, { privateKeys: kp });
+  assert.equal(r.data, URL);
+  // threshold: password + keypair, need both
+  const t = await seal({ type: 'url', data: URL, recipient: kp, passwords: ['pw'], threshold: 2, kdf: KDF });
+  const ts = await encodeEnvelope(t);
+  await assert.rejects(open(ts, { password: 'pw' }), /Need 2/);
+  await assert.rejects(open(ts, { privateKeys: kp }), /Need 2/);
+  const tr = await open(ts, { privateKeys: kp, password: 'pw' });
+  assert.equal(tr.data, URL);
+});
+
+test('signed pubx link verifies; wrong key fails', async () => {
+  const kp = await generateRecipientKeypair();
+  const id = await generateSignerIdentity('xwing-signer');
+  const env = await seal({ type: 'url', data: URL, recipient: kp, kdf: KDF, signer: id });
+  const str = await encodeEnvelope(env);
+  const parsed = await decodeEnvelope(str);
+  const sigs = await verifySignatures(parsed);
+  assert.ok(sigs.length && sigs.every((s) => s.ok));
   const r = await open(str, { privateKeys: kp });
   assert.equal(r.data, URL);
 });
@@ -726,4 +817,52 @@ test('PRF enrollment falls back to a get() eval when create() omits PRF', async 
     else globalThis.PublicKeyCredential = realPC;
     Object.defineProperty(globalThis, 'navigator', { value: realNavigator, configurable: true });
   }
+});
+
+// ---- tracker stripping --------------------------------------------------
+
+test('stripTrackingParams: global trackers removed, functional params kept', async () => {
+  const { stripTrackingParams } = await import('../site/public/lib/trackers.js');
+  const r = stripTrackingParams('https://example.com/p?utm_source=nl&fbclid=abc&gclid=x&id=42&page=2');
+  assert.equal(r.url, 'https://example.com/p?id=42&page=2');
+  assert.deepEqual([...r.removed].sort(), ['fbclid', 'gclid', 'utm_source']);
+  // any utm_* variant is caught by the prefix rule
+  assert.equal(stripTrackingParams('https://x.com/a?utm_obscure_new_one=1&k=1').url, 'https://x.com/a?utm_obscure_new_one=1&k=1' === '' ? '' : 'https://x.com/a?k=1');
+  // nothing to strip → byte-identical, no normalization surprises
+  const clean = 'https://example.com';
+  assert.equal(stripTrackingParams(clean).url, clean);
+  // 's' is a tracker on x.com but a real param elsewhere
+  assert.equal(stripTrackingParams('https://x.com/u/status/1?s=20').url, 'https://x.com/u/status/1');
+  assert.equal(stripTrackingParams('https://other.com/?s=20').url, 'https://other.com/?s=20');
+  // fragment contents never touched
+  assert.equal(stripTrackingParams('https://a.com/?utm_x=1#f?utm_keep=1').url, 'https://a.com/#f?utm_keep=1');
+  // amazon affiliate + per-host junk
+  const az = stripTrackingParams('https://amazon.com/dp/B123?tag=aff-20&pd_rd_w=x&keywords=cable&qid=1');
+  assert.equal(az.url, 'https://amazon.com/dp/B123?keywords=cable');
+  // non-http and garbage pass through untouched
+  assert.equal(stripTrackingParams('not a url').url, 'not a url');
+  assert.equal(stripTrackingParams('mailto:a@b.c?utm_source=x').url, 'mailto:a@b.c?utm_source=x');
+});
+
+test('seal strips trackers by default; strip:false preserves the URL exactly', async () => {
+  const dirty = 'https://example.com/a?utm_campaign=x&fbclid=zz&id=9';
+  const env = await seal({ type: 'url', data: dirty, passwords: ['pw'], kdf: KDF });
+  const r = await open(await encodeEnvelope(env), { password: 'pw' });
+  assert.equal(r.data, 'https://example.com/a?id=9');
+  const env2 = await seal({ type: 'url', data: dirty, passwords: ['pw'], kdf: KDF, strip: false });
+  const r2 = await open(await encodeEnvelope(env2), { password: 'pw' });
+  assert.equal(r2.data, dirty);
+  // text payloads are never touched even with strip on
+  const env3 = await seal({ type: 'text', data: 'utm_source=notaurl', passwords: ['pw'], kdf: KDF });
+  const r3 = await open(await encodeEnvelope(env3), { password: 'pw' });
+  assert.equal(r3.data, 'utm_source=notaurl');
+});
+
+test('plain short links strip trackers too (when asked)', async () => {
+  const long = 'https://example.com/' + 'path/'.repeat(8) + '?utm_source=x&real=1';
+  const enc = await encodePlainUrl(long);
+  const dec = await decodePlainUrl(enc);
+  assert.equal(dec, 'https://example.com/' + 'path/'.repeat(8) + '?real=1');
+  const dec2 = await decodePlainUrl(await encodePlainUrl(long, { strip: false }));
+  assert.equal(dec2, long);
 });

@@ -31,10 +31,11 @@ enforced expiry, fetch counters, and vanity slugs.
 │       │   ├── aes.js          AES-256-GCM helpers (IV-carrying and IV-less)
 │       │   ├── shamir.js       GF(2^8) Shamir secret sharing (m-of-n)
 │       │   ├── timelock.js     RSW puzzle (modular squaring) + legacy SHA-256 chain + rate estimation
+│       │   ├── trackers.js     URL tracking-param blocklist (AdGuard-derived, ~300 global + per-host)
 │       │   └── b64.js          base64url/bytes/hex/UTF-8 helpers
 │       ├── vendor/             esbuild-bundled deps (no CDN at runtime)
 │       │   ├── hash-wasm.js    Argon2id WASM
-│       │   ├── noble-pq.js     ML-KEM-768 + ML-DSA-65 (@noble/post-quantum)
+│       │   ├── noble-pq.js     ML-KEM-768 + ML-DSA-65 + X-Wing (@noble/post-quantum)
 │       │   ├── qrcode.js       QR encoder
 │       │   └── kd-worker.js    Classic worker script: Argon2id off the main thread
 │       ├── data/eff-large.txt  EFF large wordlist (7776 words → passphrases)
@@ -110,7 +111,8 @@ plaintext. Still openable.
 | Password KDF | Argon2id 64 MiB/3/1 (fast 8 MiB/1/1 for tests), 16 B salt | kd.js (hash-wasm, Web Worker) |
 | Legacy KDF | PBKDF2-SHA256 210 000 iters | kd.js |
 | Passkey | WebAuthn PRF (`hmac-secret`); 32 B salt; fragment = key XOR PRF | envelope.js |
-| Recipient keypair | Hybrid X25519 (WebCrypto) + ML-KEM-768 (noble); key = SHA-256("x25519"‖ssX‖"mlkem768"‖ssM) | envelope.js |
+| Recipient keypair | **X-Wing** (noble `ml_kem768_x25519`: ML-KEM-768 + X25519, SHA3-256 combiner) — default. Legacy `pub` hybrid (SHA-256 combiner) for v1 key files; `pubc` classical X25519 for opt-in short links | envelope.js |
+| Tracker stripping | ~300-param blocklist (AdGuard URL Tracking filter) + per-host rules, applied to the URL before encryption | trackers.js |
 | Thresholds | Shamir over GF(2⁸)/0x11b, per-byte polynomials, share index `xi` | shamir.js |
 | Time-lock | RSW puzzle: `b = 2^(2^n) mod N` folded into the payload key; sealer shortcuts via φ(N), opener runs n sequential squarings. Legacy SHA-256 chain links still decode. | timelock.js |
 | Signatures | Ed25519 + optional ML-DSA-65 over canonical serialization (fixed key order, v=3 domain separator) | envelope.js |

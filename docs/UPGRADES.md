@@ -19,6 +19,9 @@ the problem, the fix, and status. Everything below has been implemented.
 | E10 | Time-lock was a skippable UI delay — patching the JS opened instantly, and a hash chain invites ASIC speedup | **RSW puzzle:** payload key folded with `b = 2^(2^n) mod N` (1024-bit RSA modulus generated per session, φ(N) never leaves the sealer's memory). Seal is instant via the trapdoor; the opener MUST run `n` sequential squarings — skipping yields a wrong key → AES-GCM auth failure. New meta-flag bit 5 carries `{n, N, salt}` in v6 (`nLen+N` varint field); `{n, salt}` alone still means the legacy chain so old links open. Squaring-rate estimator calibrates `n` and the ETA; modulus is pre-generated in the background at page load | ✅ done |
 | E11 | Tampered time-lock (forged modulus) produced a raw `OperationError` — "The operation failed for an operation-specific reason" | Payload-decrypt failure wrapped in `SealError('this link failed verification…')` | ✅ done |
 | E12 | Hostile RSW parameters: 8192-bit modulus → minutes of BigInt burn per squaring; 64-bit modulus → factorable | Modulus bounded to 512–4096 bits at encode AND decode; malformed `N` fails closed | ✅ done |
+| E13 | Tracking params (`utm_*`, `fbclid`, `gclid`, Amazon/X/TikTok junk) added 50–200 uncompressible high-entropy chars to real shared links | `trackers.js`: ~300-name global blocklist + per-host rules distilled from the AdGuard URL Tracking filter, stripped before encryption. Default-on (`strip: false` / `--no-strip` / toggle to disable); surgical on the raw string so unstripped URLs stay byte-identical | ✅ done |
+| E14 | Keypair wrap used a hand-rolled SHA-256 combiner | **X-Wing** (`ml_kem768_x25519`, draft-connolly-cfrg-xwing-kem): standardized SHA3-256 combiner, 32-byte decap seed. New `pubx` wrapper kind (binary kind bits widened to 0-2; old decoders fail closed). v1 key files still seal/open via the legacy `pub` path | ✅ done |
+| E15 | Keypair links were ~1 530 chars — too long to paste comfortably | Opt-in classical-only `pubc` wrap (X25519 alone, `SHA-256("mr-x25519"‖ss)`): ~90 chars, clearly labeled "no post-quantum floor" in UI + CLI + docs | ✅ done |
 
 ## Worker hardening (`site/worker.js`)
 
@@ -72,6 +75,10 @@ the problem, the fix, and status. Everything below has been implemented.
 
 ## Deliberately NOT done (with reasons)
 
+- **Brotli payload compression** — benchmarked: loses to the deep dictionary on every
+  realistic URL (its block overhead exceeds the dictionary's head start under ~200 B)
+  and would cost a ~1.1 MB lazy WASM for a ~10 % win on rare long non-dictionary
+  URLs. The "never longer" gate makes it safe but the dependency cost is not.
 - **Rate limiting premium creates** — real per-IP limits need state (Durable Object /
   Turnstile). Premium is opt-in and ciphertext-only; documented as an open endpoint
   in PREMIUM.md. If abuse appears, put the instance behind Cloudflare Access or add

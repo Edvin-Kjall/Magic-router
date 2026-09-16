@@ -37,11 +37,15 @@ u8  flags            bit0 type (0=url 1=text) · bit1 hasMeta · bit2 hasThr
           u8 nameLen + utf8, u16 pkLen + pk, u16 sigLen + sig ]
 [ u8 n, u8 m if hasThr ]
 u8  wrapCount, then per wrapper:
-    u8  kind           bits0-1: 0 pass · 1 embed · 2 prf · 3 pub · bit7: direct
+    u8  kind           bits0-2: 0 pass · 1 embed · 2 prf · 3 pub
+                       4 pubx (X-Wing) · 5 pubc (X25519) · bit7: direct
     pass/embed: u8 kdf (0=argon2id 64MiB/3/1, 1=argon2id 8MiB/1/1, 2=pbkdf2+u32 i)
                 + 16-byte salt + [48-byte ct unless direct]
     prf: 32-byte salt + u8 cidLen + cid + [32-byte ct unless direct]
     pub: 32-byte eph X25519 pk + 1088-byte ML-KEM-768 ct + [48-byte ct unless direct]
+    pubx: 1120-byte X-Wing ct (ML-KEM-768 ct || eph X25519 pk)
+                + [48-byte ct unless direct]
+    pubc: 32-byte eph X25519 pk + [48-byte ct unless direct]
     [ u8 xi if hasThr ]
 u16 payloadLen + payload ciphertext
 ```
@@ -248,7 +252,7 @@ Security note: anyone with the link can decrypt — this is obfuscation by desig
 The link never contains the credential's public key, so Shor's algorithm has no
 target. Requires `navigator.credentials` with the `prf` extension.
 
-### `pub` — recipient keypair (hybrid, post-quantum)
+### `pub` — recipient keypair (legacy hybrid, post-quantum)
 
 ```jsonc
 { "k": "pub", "alg": "hybrid-x25519-mlkem768", "x": "…", "m": "…", "ct": "…" }
@@ -260,9 +264,40 @@ target. Requires `navigator.credentials` with the `prf` extension.
 - Combined key = `SHA-256("x25519" ‖ X25519(ephPriv, recipientPub) ‖ "mlkem768" ‖
   ML-KEM-decaps(ct, recipientSk))`; `ct` = IV ‖ AES-GCM(combinedKey, fragment).
 
+### `pubx` — X-Wing recipient keypair (hybrid, post-quantum, default)
+
+```jsonc
+{ "k": "pubx", "alg": "xwing", "m": "…", "ct": "…" }
+```
+
+- `m` — the 1120-byte X-Wing ciphertext (`ML-KEM-768 ct ‖ ephemeral X25519 pk`).
+- Wrap key = the X-Wing shared secret directly: `SHA3-256(ss_mlkem ‖ ss_x25519 ‖
+  ct_x25519 ‖ pk_x25519 ‖ "\\.//^\\")` per draft-connolly-cfrg-xwing-kem.
+- `ct` = AES-GCM(xwingKey, fragment) with the implicit zero IV.
+
+### `pubc` — classical X25519 recipient wrap (short, not post-quantum)
+
+```jsonc
+{ "k": "pubc", "alg": "x25519", "x": "…", "ct": "…" }
+```
+
+- `x` — ephemeral X25519 public key (32 bytes).
+- Wrap key = `SHA-256("mr-x25519" ‖ X25519(ephPriv, recipientPub))`.
+- Opt-in (`--classical` / "Classical-only"): ~6× shorter than a hybrid wrap;
+  deliberately gives up post-quantum resistance.
+
 Recipient key files (`seal-key.json`):
 
 ```jsonc
+// v2 (default) — X-Wing; opens pubx, pubc and pub links
+{ "v": 2, "alg": "xwing", "seed": "…(32B, secret)", "pub": "…(1216B)",
+  "x25519": { "pub": "…", "priv": "…(pkcs8, derived from seed)" } }
+
+// v2 classical — X25519 only; receives pubc links
+{ "v": 2, "alg": "x25519",
+  "x25519": { "pub": "…", "priv": "…(pkcs8)" } }
+
+// v1 (legacy) — separate X25519 + ML-KEM keypairs; opens pub links
 { "v": 1, "alg": "hybrid-x25519-mlkem768",
   "x25519": { "pub": "…", "priv": "…(pkcs8)" },
   "mlkem":  { "pub": "…", "priv": "…" } }
@@ -288,6 +323,8 @@ may be present for one identity; a hybrid-verifying client should require both.
 - Decoders MUST fail closed on any parse error, unknown version, or GCM tag failure.
 - Decoders SHOULD support both compressed and uncompressed envelopes.
 - `meta.exp` is advisory and checked client-side; only premium server mode enforces it.
+- Tracker stripping (AdGuard-derived blocklist) happens BEFORE encryption at
+  seal time and is default-on (`strip`); it never appears in the envelope.
 - The embedded-password tail is `decodeURIComponent`-ed before use.
 - Decoder resource limits (reference implementation; recommended everywhere):
   binary readers MUST reject truncated input and trailing bytes; `wrap` count is
