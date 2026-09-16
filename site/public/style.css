@@ -113,9 +113,15 @@ a:hover { text-decoration-color: var(--fg); }
 .seal-mini {
   width: 34px; height: 34px; flex: 0 0 34px;
   display: flex; align-items: center; justify-content: center;
-  background: var(--fg); color: var(--bg);
+  border: 1px solid var(--fg);
   border-radius: 50%;
-  font-size: 15px; line-height: 1;
+  color: var(--fg); font-size: 12px; line-height: 1;
+  position: relative;
+}
+.seal-mini::after {
+  content: ""; position: absolute; inset: 4px;
+  border: 1px solid var(--dim);
+  border-radius: 50%;
 }
 .brand-name {
   font-size: 12px; font-weight: 700;

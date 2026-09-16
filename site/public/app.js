@@ -281,10 +281,6 @@ async function onCreate(e) {
       qrRendered = false;
       $('qr-canvas').hidden = true;
       $('qr-toggle').textContent = 'Show QR code';
-      const orb = $('seal-orb');
-      orb.classList.remove('stamping');
-      void orb.offsetWidth;
-      orb.classList.add('stamping');
       $('share-btn').hidden = typeof navigator.share !== 'function';
       $('host-btn').hidden = true;
       $('hosted-row').hidden = true;
@@ -332,10 +328,6 @@ async function onCreate(e) {
     $('host-btn').hidden = !(premiumOn && opts.embedded == null);
     $('hosted-row').hidden = true;
     $('hosted-err').hidden = true;
-    const orb = $('seal-orb');
-    orb.classList.remove('stamping');
-    void orb.offsetWidth;
-    orb.classList.add('stamping');
     $('share-btn').hidden = typeof navigator.share !== 'function';
   } catch (e2) {
     err(e2);
@@ -353,7 +345,6 @@ function resetCreate() {
   $('pw').type = 'password';
   $('pw-toggle').textContent = '👁';
   $('create-err').hidden = true;
-  $('seal-orb').classList.remove('stamping');
   $('host-btn').hidden = true;
   $('hosted-row').hidden = true;
   $('hosted-err').hidden = true;
