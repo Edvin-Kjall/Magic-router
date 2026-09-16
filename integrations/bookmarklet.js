@@ -5,5 +5,6 @@
 (() => {
   const HOST = 'https://YOUR-HOST';
   const url = encodeURIComponent(location.href);
-  open(HOST + '/?url=' + url, '_blank');
+  // #prefill= travels in the fragment — the host never sees the destination.
+  open(HOST + '/#prefill=' + url, '_blank');
 })();

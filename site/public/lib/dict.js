@@ -1615,26 +1615,44 @@ export function hasDeep() {
   return DEEP !== null;
 }
 
+// Dictionary URLs are always site-root-absolute: a page opened from
+// /_u/<link> or /s/<slug> must not resolve them relative to itself — the
+// SPA fallback answers 200 with index.html for those paths, which would
+// fail JSON parsing and poison the Cache API.
+function deepDictUrl(name) {
+  return typeof location !== 'undefined' && location.origin
+    ? location.origin + '/' + name
+    : null;
+}
+
+function isHtmlResponse(res) {
+  return /html/i.test(res.headers.get('content-type') ?? '');
+}
+
 async function fetchDeepBytes(name) {
   // browser: Cache API around the same-origin asset
   if (typeof caches !== 'undefined') {
     try {
-      const cache = await caches.open('mr-deep-dict-' + name);
-      const url = new URL(name, globalThis.location.href).href;
-      let res = await cache.match(url);
-      if (!res) {
-        res = await fetch(url);
-        if (res.ok) cache.put(url, res.clone());
+      const url = deepDictUrl(name);
+      if (url) {
+        const cache = await caches.open('mr-deep-dict-' + name);
+        let res = await cache.match(url);
+        if (!res) {
+          res = await fetch(url);
+          if (res.ok && !isHtmlResponse(res)) cache.put(url, res.clone());
+          else res = null; // missing, or an SPA HTML fallback — never cache that
+        }
+        if (!res) throw new Error('deep dictionary fetch failed');
+        return new Uint8Array(await res.arrayBuffer());
       }
-      if (!res.ok) throw new Error('deep dictionary fetch failed');
-      return new Uint8Array(await res.arrayBuffer());
     } catch {
       /* fall through to network */
     }
   }
-  if (typeof location !== 'undefined' && location.href) {
-    const res = await fetch(new URL(name, location.href).href);
-    if (!res.ok) throw new Error('deep dictionary fetch failed');
+  const url = deepDictUrl(name);
+  if (url) {
+    const res = await fetch(url);
+    if (!res.ok || isHtmlResponse(res)) throw new Error('deep dictionary fetch failed');
     return new Uint8Array(await res.arrayBuffer());
   }
   // Node (CLI/tests): read the asset from the repo next to this module

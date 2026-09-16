@@ -35,10 +35,24 @@ html = html.replace(
 writeFileSync(`${outdir}/index.html`, html);
 
 // 3) root-level static files
-copyFileSync('site/public/style.css', `${outdir}/style.css`);
-copyFileSync('site/public/favicon.svg', `${outdir}/favicon.svg`);
+for (const f of [
+  'style.css',
+  'favicon.svg',
+  'favicon-16.png',
+  'favicon-32.png',
+  'apple-touch-icon.png',
+  'icon-192.png',
+  'icon-512.png',
+  'og.png',
+  'site.webmanifest',
+]) {
+  copyFileSync(`site/public/${f}`, `${outdir}/${f}`);
+}
 copyFileSync('site/public/data/eff-large.txt', `${outdir}/eff-large.txt`);
 copyFileSync('site/public/deep-v1.json.gz', `${outdir}/deep-v1.json.gz`);
 copyFileSync('site/public/deep-v2.json.gz', `${outdir}/deep-v2.json.gz`);
+mkdirSync(`${outdir}/fonts`, { recursive: true });
+copyFileSync('site/public/fonts/D-DIN.woff2', `${outdir}/fonts/D-DIN.woff2`);
+copyFileSync('site/public/fonts/D-DIN-Bold.woff2', `${outdir}/fonts/D-DIN-Bold.woff2`);
 
-console.log(`drop build ready in ${outdir}/ (index.html, bundle.js, style.css, favicon.svg, eff-large.txt, deep-v1.json.gz, deep-v2.json.gz)`);
+console.log(`drop build ready in ${outdir}/`);

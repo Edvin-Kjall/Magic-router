@@ -25,6 +25,9 @@ import {
   encodeEnvelope,
   decodeEnvelope,
   splitEmbedded,
+  extractLinkFragment,
+  isPlainLink,
+  decodePlainUrl,
   describeEnvelope,
   generateRecipientKeypair,
   generateSignerIdentity,
@@ -62,6 +65,7 @@ Usage:
                [--threshold <m>] [--delay <30s|5m|2h|1d>] [--expires <ISO-date>]
                [--note <text>] [--sign <seal-identity.json>] [--pq] [--preview]
                [--host <origin>] [--path] [--qr] [--json]
+               [--store [--slug <s>] [--burn]]
 
   seal open    <link> [--password <pw>]... [--key <seal-key.json>] [--json]
   seal keygen  --recipient | --identity <name> [--out <file>]
@@ -76,16 +80,28 @@ Notes:
   opens. Honest caveat: client-side delay, bypassable by editing the page.
   --host + --path emit a path-style URL (/_u/...) — the server sees the
   ciphertext but still cannot decrypt it.
+  --store posts the envelope to the host's premium API and prints the short
+  /s/<slug> URL (server stores ciphertext only; needs PREMIUM on the host).
+  --burn makes the hosted envelope self-delete after one fetch.
+  open also accepts hosted https://host/s/<slug> links directly.
 `.trim();
 
 function fail(msg) {
-  console.error('seal: ' + msg);
+  // SealError messages already carry a "seal: " prefix — don't double it.
+  console.error('seal: ' + String(msg).replace(/^seal:\s*/, ''));
   process.exit(1);
 }
 
-// argv scanner: --flag value, --flag=value, --boolflag, repeatable flags
+// argv scanner: --flag value, --flag=value, --boolflag, repeatable flags.
+// A value flag without a value is an error, never a silent `true`.
+const BOOL_FLAGS = new Set(['json', 'qr', 'path', 'help', 'pq', 'preview', 'store', 'burn']);
+const VALUE_FLAGS = new Set([
+  'url', 'text', 'embed', 'recipient', 'threshold', 'delay', 'expires',
+  'note', 'sign', 'out', 'host', 'key', 'words', 'identity', 'slug',
+]);
+const PASSWORD_ALIASES = new Set(['password', 'pw', 'pwd']);
+
 function parseArgs(argv) {
-  const bools = new Set(['json', 'qr', 'path', 'help', 'burn', 'pq', 'preview']);
   const out = { _: [], f: {} };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -95,47 +111,42 @@ function parseArgs(argv) {
     }
     const eq = a.indexOf('=');
     if (eq !== -1) {
-      const k = a.slice(2, eq);
-      const v = a.slice(eq + 1);
-      addFlag(out, k, v, bools);
+      addFlag(out, a.slice(2, eq), a.slice(eq + 1));
       continue;
     }
     const k = a.slice(2);
+    if (BOOL_FLAGS.has(k)) {
+      addFlag(out, k, true);
+      continue;
+    }
+    if (!PASSWORD_ALIASES.has(k) && !VALUE_FLAGS.has(k)) {
+      fail(`unknown option --${k} — try: seal --help`);
+    }
     const next = argv[i + 1];
-    if (!bools.has(k) && next !== undefined && !next.startsWith('--')) {
-      addFlag(out, k, next, bools);
+    if (next !== undefined && !next.startsWith('--')) {
+      addFlag(out, k, next);
       i++;
+    } else if (k === 'recipient') {
+      addFlag(out, k, 'seal-key.json'); // bare --recipient: the default file
     } else {
-      addFlag(out, k, true, bools);
+      fail(`--${k} needs a value${next === undefined ? '' : ` (--${next.slice(2)} follows it)`}`);
     }
   }
   return out;
 }
 
-function addFlag(out, k, v, bools) {
-  if (bools.has(k) || k === 'password' || k === 'pwd' || k === 'pw') {
-    (out.f[k] ??= []).push(v);
+function addFlag(out, k, v) {
+  // --password/--pw/--pwd are one repeatable flag; everything else is scalar.
+  if (PASSWORD_ALIASES.has(k)) {
+    (out.f.password ??= []).push(v);
   } else {
     out.f[k] = v;
   }
 }
 
-function extractLink(input) {
-  let s = String(input);
-  const hash = s.indexOf('#');
-  if (hash !== -1) s = s.slice(hash + 1);
-  const u = s.indexOf('/_u/');
-  if (u !== -1) s = s.slice(u + 4);
-  try {
-    s = decodeURIComponent(s);
-  } catch {
-    /* raw */
-  }
-  return s;
-}
-
 async function cmdCreate(args) {
   const f = args.f;
+  if (f.url && f.text) fail('give either --url or --text, not both');
   const type = f.text ? 'text' : 'url';
   const data = f.text ?? f.url;
   if (!data) fail('create needs --url <destination> or --text <secret>');
@@ -144,10 +155,13 @@ async function cmdCreate(args) {
   if (passwords.length) opts.passwords = passwords;
   if (f.embed) opts.embedded = String(f.embed);
   if (f.recipient) {
-    const j = f.recipient === true ? 'seal-key.json' : f.recipient;
-    opts.recipient = JSON.parse(readFileSync(j, 'utf8'));
+    opts.recipient = JSON.parse(readFileSync(f.recipient, 'utf8'));
   }
-  if (f.threshold) opts.threshold = Number(f.threshold);
+  if (f.threshold != null) {
+    const m = Number(f.threshold);
+    if (!Number.isInteger(m) || m < 1) fail('--threshold must be a whole number ≥ 1');
+    opts.threshold = m;
+  }
   if (f.delay) {
     const ms = parseDuration(f.delay);
     const rate = await estimateHashRate();
@@ -156,7 +170,10 @@ async function cmdCreate(args) {
   if (f.expires) opts.expiry = f.expires;
   if (f.note) opts.note = String(f.note);
   if (f.sign) opts.signer = JSON.parse(readFileSync(f.sign, 'utf8'));
-  if (f.pq) opts.pq = true;
+  if (f.pq) {
+    if (!f.sign) fail('--pq only makes sense together with --sign');
+    opts.pq = true;
+  }
   if (f.preview) opts.preview = true;
 
   const env = await seal(opts);
@@ -165,12 +182,39 @@ async function cmdCreate(args) {
   const full = frag + tail;
   const url = f.host ? `${f.host}${f.path ? '/_u/' : '/#'}${full}` : null;
 
+  // Premium: store the ciphertext envelope on the host, get a short
+  // /s/<slug> link. The server sees the envelope only — never a password.
+  if (f.store || f.slug || f.burn) {
+    if (!f.store) fail('--slug/--burn only make sense together with --store');
+    if (!f.host) fail('--store needs --host <origin>');
+    if (opts.embedded != null) {
+      fail('embedded-password links cannot be hosted — the password tail must never reach the server');
+    }
+    const res = await fetch(f.host.replace(/\/+$/, '') + '/api/link', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        slug: f.slug || undefined,
+        envelope: frag,
+        burn: f.burn === true || undefined,
+        exp: opts.expiry ? new Date(opts.expiry).toISOString() : undefined,
+      }),
+    });
+    const hosted = await res.json().catch(() => ({}));
+    if (!res.ok) fail(`store failed: ${hosted.error || `HTTP ${res.status}`}`);
+    if (f.json) console.log(JSON.stringify({ fragment: full, url: hosted.url }));
+    else {
+      console.log('hosted link:');
+      console.log('  ' + hosted.url);
+    }
+    return;
+  }
+
   if (f.json) {
     console.log(JSON.stringify({ fragment: full, url }));
   } else {
     console.log('sealed link:');
     console.log('  ' + (url ?? full));
-    if (f.host && !url) console.log('  (fragment only: ' + full + ')');
   }
   if (f.qr) {
     const target = url ?? full;
@@ -179,9 +223,41 @@ async function cmdCreate(args) {
   }
 }
 
+// https://host/s/<slug> → fetch the hosted envelope (ciphertext only) from
+// the premium API. Redirect rows print the destination straight away.
+async function resolveHosted(link) {
+  const m = /^(https?:\/\/[^/]+)\/s\/([a-z0-9_-]{3,64})\/?$/i.exec(String(link).trim());
+  if (!m) return link;
+  const res = await fetch(`${m[1]}/api/link/${m[2]}`);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    fail(res.status === 410 ? `hosted link is gone — ${body.error || 'burned, expired, or never existed'}` : `hosted link fetch failed: ${body.error || `HTTP ${res.status}`}`);
+  }
+  if (body.redirect) return { redirect: body.redirect, meta: body.meta };
+  if (body.meta?.fetches != null) {
+    process.stderr.write(
+      `hosted link · fetched ${body.meta.fetches}×${body.meta.burnt ? ' · burned after this fetch' : ''}\n`
+    );
+  }
+  return body.envelope;
+}
+
 async function cmdOpen(args, link) {
   const f = args.f;
-  const str = extractLink(link);
+  const resolved = await resolveHosted(link);
+  if (resolved && typeof resolved === 'object' && resolved.redirect) {
+    if (f.json) console.log(JSON.stringify({ type: 'url', data: resolved.redirect, meta: resolved.meta }));
+    else console.log(resolved.redirect);
+    return;
+  }
+  const str = extractLinkFragment(resolved);
+  if (isPlainLink(str)) {
+    // Plain (unencrypted) short links: no credentials, just decode.
+    const url = await decodePlainUrl(str);
+    if (f.json) console.log(JSON.stringify({ type: 'url', data: url }));
+    else console.log(url);
+    return;
+  }
   const passwords = (f.password ?? []).map(String);
   const creds = {};
   if (passwords.length === 1) creds.password = passwords[0];
@@ -206,15 +282,22 @@ async function cmdOpen(args, link) {
 
   if (f.json) {
     console.log(JSON.stringify(r, null, 2));
-  } else if (r.type === 'url') {
-    console.log(r.data);
   } else {
     console.log(r.data);
   }
 }
 
 async function cmdInfo(args, link) {
-  const str = extractLink(link);
+  const resolved = await resolveHosted(link);
+  if (resolved && typeof resolved === 'object' && resolved.redirect) {
+    console.log(JSON.stringify({ type: 'redirect', encrypted: false, url: resolved.redirect, meta: resolved.meta }, null, 2));
+    return;
+  }
+  const str = extractLinkFragment(resolved);
+  if (isPlainLink(str)) {
+    console.log(JSON.stringify({ type: 'plain', encrypted: false, url: await decodePlainUrl(str) }, null, 2));
+    return;
+  }
   if (/^v[12]\./.test(str)) {
     console.log('legacy link (pre-v3). Upgrade: open it in the web app and reseal.');
     return;
@@ -286,8 +369,8 @@ async function main() {
     return;
   }
   const cmd = argv[0];
-  const args = parseArgs(argv.slice(1));
   try {
+    const args = parseArgs(argv.slice(1));
     switch (cmd) {
       case 'create':
       case 'seal':
@@ -316,4 +399,4 @@ async function main() {
   }
 }
 
-main();
+main().catch((e) => fail(e?.message ?? String(e)));

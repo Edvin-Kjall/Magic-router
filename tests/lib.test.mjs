@@ -16,6 +16,7 @@ import {
   encodeEnvelope,
   decodeEnvelope,
   splitEmbedded,
+  extractLinkFragment,
   generateRecipientKeypair,
   generateSignerIdentity,
   signEnvelope,
@@ -25,6 +26,7 @@ import {
   isPlainLink,
   encodePlainUrl,
   decodePlainUrl,
+  SealError,
 } from '../site/public/lib/envelope.js';
 
 const KDF = ARGON2ID_FAST;
@@ -435,4 +437,229 @@ test('legacy v4 (s4., IV-carrying) envelopes still open', async () => {
   const r = await open(s4, { password: 'pw' });
   assert.equal(r.data, URL);
   await assert.rejects(open(s4, { password: 'wrong' }));
+});
+
+// ------------------------------------------------- regression: 2026-09 fixes
+
+test('extractLinkFragment decodes once, never pre-decodes plain links', async () => {
+  // Plain (u0.–u3.) bodies carry their own %23/%25 escapes — a premature
+  // decodeURIComponent turned %25 into % and %23 into #, corrupting the
+  // destination (https://x/a%23b opened as https://x/a#b).
+  const raw = 'u0.Cinosida.se/nyheter/a%2525b';
+  assert.equal(extractLinkFragment(raw), raw);
+  assert.equal(extractLinkFragment('https://host/#' + raw), raw);
+  assert.equal(extractLinkFragment('https://host/_u/' + raw), raw);
+  // ...and the full round-trip survives
+  assert.equal(
+    await decodePlainUrl(extractLinkFragment('https://any.host/#' + raw)),
+    'https://inosida.se/nyheter/a%25b'
+  );
+  // Sealed envelopes DO decode once (embedded-password tails are encoded)
+  assert.equal(extractLinkFragment('https://host/#s6.abc.my%20pw'), 's6.abc.my pw');
+  assert.equal(extractLinkFragment('https://host/_u/s6.abc.my%20pw'), 's6.abc.my pw');
+  assert.equal(extractLinkFragment('s6.abc.my%20pw'), 's6.abc.my pw');
+  // malformed escapes pass through raw instead of throwing
+  assert.equal(extractLinkFragment('s6.abc.%zz'), 's6.abc.%zz');
+});
+
+test('direct mode tries every password candidate (CLI multi-password links)', async () => {
+  // A single-method link is direct: payload encrypted under the password's
+  // key with no wrap layer to verify against. open() used to read only
+  // creds.password, so the CLI's 2+ --password list could never unlock it.
+  const env = await seal({ type: 'url', data: URL, passwords: ['real'], kdf: KDF });
+  assert.equal(env.wrap.length, 1);
+  assert.ok(env.wrap[0].direct);
+  const str = await encodeEnvelope(env);
+  const r = await open(str, { passwords: ['wrong', 'real'] });
+  assert.equal(r.data, URL);
+  await assert.rejects(open(str, { passwords: ['wrong', 'also-wrong'] }), /None of the provided/);
+  // embedded variant
+  const env2 = await seal({ type: 'url', data: URL, embedded: 'real2', kdf: KDF });
+  const str2 = await encodeEnvelope(env2);
+  const r2 = await open(str2, { embeddedPasswords: ['nope', 'real2'] });
+  assert.equal(r2.data, URL);
+});
+
+test('binary envelope: large payloads round-trip; oversized fields fail loudly', async () => {
+  // 40 KB used to blow the engine's argument-count limit via
+  // out.push(...payload); now it round-trips.
+  const big = 'x'.repeat(40000);
+  const env = await seal({ type: 'text', data: big, passwords: ['pw'], kdf: KDF });
+  const r = await open(await encodeEnvelope(env), { password: 'pw' });
+  assert.equal(r.data, big);
+
+  // u8/u16 length fields would silently wrap on overflow — refuse instead.
+  // (getRandomValues caps at 65536 bytes per call, hence the concat)
+  const huge = concatBytes(randomBytes(65536), randomBytes(4464));
+  await assert.rejects(
+    encodeEnvelope({ v: 6, t: 'text', meta: {}, wrap: [], payload: { ct: bytesToB64u(huge) } }),
+    (e) => e instanceof SealError && /payload too large/.test(e.message)
+  );
+  await assert.rejects(
+    encodeEnvelope({ v: 6, t: 'url', meta: { host: 'h'.repeat(256) }, wrap: [], payload: { ct: bytesToB64u(randomBytes(48)) } }),
+    (e) => e instanceof SealError && /host too long/.test(e.message)
+  );
+  await assert.rejects(
+    encodeEnvelope({
+      v: 6, t: 'url',
+      meta: { sig: [{ alg: 'ed25519', name: 'n'.repeat(256), pk: '', sig: '' }] },
+      wrap: [], payload: { ct: bytesToB64u(randomBytes(48)) },
+    }),
+    (e) => e instanceof SealError && /name too long/.test(e.message)
+  );
+});
+
+test('malformed envelopes fail closed with SealError, not stray TypeErrors', async () => {
+  // truncated s6 binary — reads past the end must throw, not clamp silently
+  const env = await seal({ type: 'url', data: URL, passwords: ['pw'], kdf: KDF });
+  const str = await encodeEnvelope(env);
+  const raw = b64uToBytes(str.slice(3));
+  for (const cut of [2, 5, raw.length - 5, raw.length - 1]) {
+    const trunc = 's6.' + bytesToB64u(raw.subarray(0, cut));
+    await assert.rejects(open(trunc, { password: 'pw' }), SealError);
+  }
+  // trailing garbage after the payload is rejected
+  const trailing = 's6.' + bytesToB64u(concatBytes(raw, new Uint8Array([1, 2, 3])));
+  await assert.rejects(open(trailing, { password: 'pw' }), SealError);
+  // bad base64, bad JSON, missing fields — all SealError
+  await assert.rejects(open('s3.!!!', { password: 'pw' }), SealError);
+  await assert.rejects(open('s5.' + bytesToB64u(concatBytes(new Uint8Array([0]), new TextEncoder().encode('{no'))), { password: 'pw' }), SealError);
+  const noWrap = 's3.' + bytesToB64u(concatBytes(new Uint8Array([0]), new TextEncoder().encode(JSON.stringify({ v: 3, t: 'url', payload: { ct: 'AAAA' } }))));
+  await assert.rejects(open(noWrap, { password: 'pw' }), /no unlock methods/);
+  const noPayload = 's3.' + bytesToB64u(concatBytes(new Uint8Array([0]), new TextEncoder().encode(JSON.stringify({ v: 3, t: 'url', wrap: [{ k: 'pass' }] }))));
+  await assert.rejects(open(noPayload, { password: 'pw' }), /missing payload/);
+});
+
+test('wrapper count cap: crafted 65-wrapper link is rejected at decode', async () => {
+  // 65 non-direct pass wrappers: kind(0) kdf(0) salt16 ct48 each
+  const one = concatBytes(new Uint8Array([0, 0]), randomBytes(16), randomBytes(48));
+  const raw = concatBytes(new Uint8Array([6, 0, 65]), ...Array.from({ length: 65 }, () => one), new Uint8Array([0, 48]), randomBytes(48));
+  const link = 's6.' + bytesToB64u(raw);
+  await assert.rejects(open(link, { password: 'pw' }), /too many unlock methods/);
+  await assert.rejects(decodeEnvelope(link), /too many unlock methods/);
+});
+
+test('threshold invariants enforced: n must equal wrap count, xi unique in range', async () => {
+  // thr.n=3 but only 1 wrapper → corrupt
+  const wrap = concatBytes(new Uint8Array([0, 0]), randomBytes(16), randomBytes(48));
+  const bad = concatBytes(new Uint8Array([6, 4, 3, 2, 1]), wrap, new Uint8Array([0, 48]), randomBytes(48));
+  await assert.rejects(decodeEnvelope('s6.' + bytesToB64u(bad)), /threshold count does not match/);
+  // duplicate share index
+  const two = concatBytes(
+    new Uint8Array([6, 4, 2, 2, 2]),
+    wrap, new Uint8Array([1]),
+    wrap, new Uint8Array([1]),
+    new Uint8Array([0, 48]), randomBytes(48)
+  );
+  await assert.rejects(decodeEnvelope('s6.' + bytesToB64u(two)), /bad share index/);
+});
+
+test('binaryEncode refuses malformed fields instead of writing corrupt links', async () => {
+  const mk = (wrap, extra = {}) => ({
+    v: 6, t: 'url', meta: {}, wrap, payload: { ct: bytesToB64u(randomBytes(48)) }, ...extra,
+  });
+  const pw = (over) => ({ k: 'pass', kd: { algo: 'argon2id', m: 8192, t: 1, p: 1 }, s: bytesToB64u(randomBytes(16)), ct: bytesToB64u(randomBytes(48)), ...over });
+  await assert.rejects(encodeEnvelope(mk([pw({ s: bytesToB64u(randomBytes(8)) })])), /salt must be 16 bytes/);
+  await assert.rejects(encodeEnvelope(mk([pw({ ct: bytesToB64u(randomBytes(10)) })])), /wrapped key must be 48 bytes/);
+  await assert.rejects(encodeEnvelope(mk([{ k: 'pub', x: bytesToB64u(randomBytes(10)), m: bytesToB64u(randomBytes(1088)) }])), /ephemeral public key must be 32/);
+  await assert.rejects(encodeEnvelope(mk([pw()], { meta: { exp: 'not-a-date' } })), /invalid expiry/);
+  await assert.rejects(encodeEnvelope(mk([pw()], { meta: { time: { n: 5, salt: bytesToB64u(randomBytes(8)) } } })), /time-lock salt must be 16 bytes/);
+  await assert.rejects(seal({ type: 'url', data: URL, passwords: ['pw'], kdf: KDF, expiry: 'garbage' }), SealError);
+});
+
+test('absurd time-locks are refused instead of freezing the page', async () => {
+  const env = await seal({ type: 'url', data: URL, passwords: ['pw'], kdf: KDF });
+  env.meta.time = { n: 2 ** 43, salt: bytesToB64u(randomBytes(16)) }; // ~97 days at 1M h/s
+  const str = await encodeEnvelope(env);
+  await assert.rejects(open(str, { password: 'pw' }), /unreasonable time-lock/);
+});
+
+test('time-lock reports progress', async () => {
+  const saltB64 = bytesToB64u(randomBytes(16));
+  const env = await seal({ type: 'url', data: URL, passwords: ['pw'], timeLock: { saltB64, n: 500 }, kdf: KDF });
+  const str = await encodeEnvelope(env);
+  const ticks = [];
+  const r = await open(str, { password: 'pw' }, { onProgress: (d, t) => ticks.push([d, t]) });
+  assert.equal(r.data, URL);
+  assert.ok(ticks.length >= 1, 'progress callback must fire');
+  assert.deepEqual(ticks.at(-1), [500, 500]);
+});
+
+test('u0. raw links fail cleanly on empty or garbage bodies', async () => {
+  await assert.rejects(decodePlainUrl('u0.'), SealError);
+  await assert.rejects(decodePlainUrl('u1.'), SealError);
+  await assert.rejects(decodePlainUrl('u1.%%%'), SealError);
+});
+
+test('decompression bomb: links that inflate past 4 MiB are rejected', async () => {
+  // deflate-compress 8 MiB of zeros — a few hundred bytes of input
+  const bomb = zlib.deflateRawSync(Buffer.alloc(8 * 1024 * 1024));
+  const env = {
+    v: 3, t: 'url', meta: {},
+    wrap: [{ k: 'pass', kd: { algo: 'argon2id', m: 8192, t: 1, p: 1 }, s: 'AAAA', ct: 'AAAA' }],
+    payload: { ct: 'AAAA' },
+  };
+  const json = new TextEncoder().encode(JSON.stringify(env));
+  const raw = concatBytes(new Uint8Array([1]), new Uint8Array(bomb));
+  const link = 's3.' + bytesToB64u(raw);
+  await assert.rejects(open(link, { password: 'pw' }), /safety limit/);
+});
+
+test('passkey prompt cancellation is not a wrong-credential error', async () => {
+  // Hand-built compact envelopes with a prf wrapper; the prfAssertion
+  // callback stands in for the browser's WebAuthn prompt.
+  const cancel = async () => {
+    const e = new Error('user cancelled the prompt');
+    e.name = 'NotAllowedError';
+    throw e;
+  };
+  const mk = (k) => ({
+    v: 4,
+    t: 'url',
+    m: {},
+    w: [{ k, s: bytesToB64u(randomBytes(32)), q: bytesToB64u(randomBytes(16)), c: bytesToB64u(randomBytes(32)) }],
+    p: { c: bytesToB64u(randomBytes(64)) },
+  });
+  const enc = (o) => 's4.' + bytesToB64u(concatBytes(new Uint8Array([0]), new TextEncoder().encode(JSON.stringify(o))));
+  // wrapped (non-direct) prf: cancel propagates
+  await assert.rejects(open(enc(mk('r')), { prfAssertion: cancel }), (e) => e.name === 'NotAllowedError');
+  // direct prf: cancel propagates too
+  await assert.rejects(open(enc(mk('R')), { prfAssertion: cancel }), (e) => e.name === 'NotAllowedError');
+  // a silent skip (no assertion) is still "no credential", not a crash
+  await assert.rejects(open(enc(mk('r')), { prfAssertion: async () => null }), /None of the provided/);
+});
+
+test('PRF enrollment falls back to a get() eval when create() omits PRF', async () => {
+  // Many authenticators only evaluate PRF on get(), not during create().
+  const realNavigator = globalThis.navigator;
+  const realPC = globalThis.PublicKeyCredential;
+  const first = randomBytes(32);
+  const getCalls = [];
+  const fakeCred = { rawId: randomBytes(16).buffer, getClientExtensionResults: () => ({}) };
+  Object.defineProperty(globalThis, 'navigator', {
+    value: {
+      credentials: {
+        create: async () => fakeCred, // returns NO prf result
+        get: async (opts) => {
+          getCalls.push(opts);
+          return { getClientExtensionResults: () => ({ prf: { results: { first: first.buffer } } }) };
+        },
+      },
+    },
+    configurable: true,
+  });
+  globalThis.PublicKeyCredential = class {};
+  try {
+    const env = await seal({ type: 'url', data: URL, prf: true, kdf: KDF });
+    assert.equal(getCalls.length, 1, 'enrollment must retry PRF via get()');
+    assert.equal(env.wrap[0].k, 'prf');
+    // the PRF output from the fallback must actually unlock the link
+    const str = await encodeEnvelope(env);
+    const r = await open(str, { prfAssertion: async () => first });
+    assert.equal(r.data, URL);
+  } finally {
+    if (realPC === undefined) delete globalThis.PublicKeyCredential;
+    else globalThis.PublicKeyCredential = realPC;
+    Object.defineProperty(globalThis, 'navigator', { value: realNavigator, configurable: true });
+  }
 });

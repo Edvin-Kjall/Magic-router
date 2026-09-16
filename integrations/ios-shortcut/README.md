@@ -7,7 +7,7 @@ Seal any URL from the share sheet or the Shortcuts app.
 1. **Receive**: `URLs` from *Share Sheet* (and *Shortcuts*).
 2. **URL**: pass the input through (ensures a URL type).
 3. **URL Encode**: `URL Encode` on the URL.
-4. **Text**: `https://YOUR-HOST/?url=<URL-Encoded Text>`.
+4. **Text**: `https://YOUR-HOST/#prefill=<URL-Encoded Text>`.
 5. **Open URLs**: open the text.
 
 Replace `YOUR-HOST` with your deployment origin.

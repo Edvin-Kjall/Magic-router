@@ -17,5 +17,6 @@ export default async function seal(args: Args) {
   if (!url) url = await Clipboard.readText();
   url = url || "";
   const target = /^https?:\/\//i.test(url) ? url : "https://" + url;
-  await open(`${HOST}/?url=${encodeURIComponent(target)}`);
+  // #prefill= travels in the fragment — the host never sees the destination.
+  await open(`${HOST}/#prefill=${encodeURIComponent(target)}`);
 }

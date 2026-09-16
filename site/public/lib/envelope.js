@@ -40,6 +40,23 @@ export const KDF_DEFAULT = ARGON2ID;
 
 export class SealError extends Error {}
 
+// Decoder limits — bound the damage a hostile/corrupt link can do.
+// 64 wrappers is far beyond any legit link (the UI tops out around 5), but
+// caps the password-candidates × wrappers Argon2id blowup on crafted links.
+export const MAX_WRAPPERS = 64;
+// Deflate bombs: a tiny crafted link must never expand to gigabytes.
+export const MAX_INFLATE = 4 * 1024 * 1024;
+// u48 allows ~9 000 years of grinding — refuse absurd time-locks
+// (the UI offers at most 1 day; this leaves ~50 days of headroom at 1M h/s).
+export const MAX_TIMELOCK_N = 2 ** 42;
+
+// A WebAuthn prompt the user dismissed (or that timed out) is not a wrong
+// credential — callers use this to keep the UI quiet instead of claiming
+// "None of the provided credentials unlocked this link".
+export function isCancelError(e) {
+  return e?.name === 'NotAllowedError' || e?.name === 'AbortError';
+}
+
 // ---------------------------------------------------------------- basics
 
 async function sha256(bytes) {
@@ -149,16 +166,42 @@ async function deflateMaybe(bytes) {
   return { flag: 0, bytes };
 }
 
+// Inflate with a hard output cap — a crafted link must not become a
+// decompression bomb. Reads the stream chunk-wise so the cap is enforced
+// before the full output is allocated.
+async function inflateCapped(bytes) {
+  if (typeof DecompressionStream !== 'undefined') {
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+    const reader = stream.getReader();
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.length;
+      if (total > MAX_INFLATE) {
+        reader.cancel().catch(() => {});
+        throw new SealError(`link expands beyond the ${MAX_INFLATE / 1024 / 1024} MiB safety limit`);
+      }
+      chunks.push(value);
+    }
+    return concatBytes(...chunks);
+  }
+  const zlib = await import('node:zlib');
+  const out = new Uint8Array(zlib.inflateRawSync(bytes, { maxOutputLength: MAX_INFLATE }));
+  if (out.length > MAX_INFLATE) {
+    throw new SealError(`link expands beyond the ${MAX_INFLATE / 1024 / 1024} MiB safety limit`);
+  }
+  return out;
+}
+
 async function inflateMaybe(flag, bytes) {
   if (flag === 1) {
-    if (typeof DecompressionStream !== 'undefined') {
-      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-      return new Uint8Array(await new Response(stream).arrayBuffer());
-    }
+    if (typeof DecompressionStream !== 'undefined') return inflateCapped(bytes);
     try {
-      const zlib = await import('node:zlib');
-      return new Uint8Array(zlib.inflateRawSync(bytes));
-    } catch {
+      return await inflateCapped(bytes);
+    } catch (e) {
+      if (e instanceof SealError) throw e; // bomb cap is not "not compressed"
       /* fall through */
     }
   }
@@ -166,18 +209,10 @@ async function inflateMaybe(flag, bytes) {
 }
 
 async function inflateIfPossible(bytes) {
-  if (typeof DecompressionStream !== 'undefined') {
-    try {
-      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-      return new Uint8Array(await new Response(stream).arrayBuffer());
-    } catch {
-      return bytes;
-    }
-  }
   try {
-    const zlib = await import('node:zlib');
-    return new Uint8Array(zlib.inflateRawSync(bytes));
-  } catch {
+    return await inflateCapped(bytes);
+  } catch (e) {
+    if (e instanceof SealError) throw e; // a real inflate that overflows is a bomb, not "not compressed"
     return bytes;
   }
 }
@@ -202,6 +237,29 @@ export function isPlainLink(s) {
     s.startsWith(PLAIN_PREFIX) || s.startsWith(PLAIN_PREFIX_DEEP) ||
     s.startsWith(PLAIN_PREFIX_DEEP2) || s.startsWith(PLAIN_PREFIX_RAW)
   );
+}
+
+// Pull the link string out of whatever the user pasted or the browser
+// served: 's6.…', '#s6.…', '/_u/s6.…', 'https://host/#s6.…' or
+// 'https://host/_u/s6.…'. Percent-decoding happens AT MOST ONCE, and
+// never for plain (u0.–u3.) links — raw-mode bodies carry their own
+// %23/%25 escapes that decodePlainUrl() owns, so pre-decoding them would
+// corrupt the destination. Sealed envelopes get decoded once because
+// their embedded-password tail may be percent-encoded.
+export function extractLinkFragment(input) {
+  let s = String(input ?? '');
+  const hash = s.indexOf('#');
+  if (hash !== -1) s = s.slice(hash + 1);
+  else {
+    const u = s.indexOf('/_u/');
+    if (u !== -1) s = s.slice(u + 4);
+  }
+  if (isPlainLink(s)) return s;
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s; // malformed escapes: hand the raw string to the decoders
+  }
 }
 
 export async function encodePlainUrl(url) {
@@ -268,6 +326,7 @@ export async function encodePlainUrl(url) {
 export async function decodePlainUrl(str) {
   if (str.startsWith(PLAIN_PREFIX_RAW)) {
     const body = str.slice(PLAIN_PREFIX_RAW.length);
+    if (!body) throw new SealError('malformed short link');
     const v = b64uToBytes(body[0] + 'A')[0] >> 2;
     let s = body.slice(1).replace(/%23/g, '#').replace(/%25/g, '%');
     if (v & 4) s = 'www.' + s;
@@ -285,7 +344,13 @@ export async function decodePlainUrl(str) {
   } else if (str.startsWith(PLAIN_PREFIX)) {
     str = str.slice(PLAIN_PREFIX.length);
   }
-  const raw = b64uToBytes(str);
+  let raw;
+  try {
+    raw = b64uToBytes(str);
+  } catch {
+    throw new SealError('malformed short link');
+  }
+  if (!raw.length) throw new SealError('malformed short link');
   const flags = raw[0];
   const scheme = (flags >> 1) & 3;
   let bytes = await inflateMaybe(flags & 1, raw.subarray(1));
@@ -425,9 +490,67 @@ function numBytes(n, len) {
   return out;
 }
 
+// out.push(...bytes) with a chunk size that stays far below the engine's
+// argument-count limit — large text secrets would otherwise blow the stack.
+function pushBytes(out, bytes) {
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    out.push(...bytes.subarray(i, i + 0x8000));
+  }
+}
+
+// Decode a base64url field and enforce its exact byte length — a malformed
+// envelope object must fail loudly here instead of producing a corrupt link.
+function fieldBytes(b64, len, what) {
+  let b;
+  try {
+    b = b64uToBytes(String(b64 ?? ''));
+  } catch {
+    throw new SealError(`malformed envelope: bad ${what}`);
+  }
+  if (len != null && b.length !== len) {
+    throw new SealError(`malformed envelope: ${what} must be ${len} bytes, got ${b.length}`);
+  }
+  return b;
+}
+
 function binaryEncode(env) {
   const out = [];
   const m = env.meta || {};
+
+  // Length fields are u8/u16 — refuse values that would silently wrap and
+  // produce a corrupt envelope instead of a friendly error.
+  const hostBytes = m.host != null ? toBytes(m.host) : null;
+  const noteBytes = m.note != null ? toBytes(m.note) : null;
+  const payloadBytes = fieldBytes(env.payload?.ct, null, 'payload ciphertext');
+  if (hostBytes?.length > 255) throw new SealError(`host too long for the link format (max 255 bytes, got ${hostBytes.length})`);
+  if (noteBytes?.length > 65535) throw new SealError(`note too long for the link format (max 65535 bytes, got ${noteBytes.length})`);
+  if (payloadBytes.length > 65535) {
+    throw new SealError(`payload too large for the link format (max 64 KiB encrypted, got ${payloadBytes.length} bytes)`);
+  }
+  if (!Array.isArray(env.wrap) || env.wrap.length > 255) {
+    throw new SealError('too many unlock methods for the link format (max 255)');
+  }
+  if (env.thr && (env.thr.n > 255 || env.thr.m > 255)) {
+    throw new SealError('threshold too large for the link format (max 255)');
+  }
+  let expMs = null;
+  if (m.exp != null) {
+    expMs = Date.parse(m.exp);
+    if (!Number.isFinite(expMs) || expMs < 0 || expMs >= 2 ** 48) {
+      throw new SealError('invalid expiry — must be a parseable date within the u48 range');
+    }
+  }
+  if (m.time != null && (!Number.isFinite(m.time.n) || m.time.n < 1 || m.time.n >= 2 ** 48)) {
+    throw new SealError('invalid time-lock round count');
+  }
+  const timeSalt = m.time != null ? fieldBytes(m.time.salt, 16, 'time-lock salt') : null;
+  const sigs = m.sig ?? [];
+  if (sigs.length > 255) throw new SealError('too many signatures for the link format');
+  for (const s of sigs) {
+    if (toBytes(s.name).length > 255) throw new SealError(`signer name too long for the link format (max 255 bytes)`);
+    if (s.alg !== 'ed25519' && s.alg !== 'mldsa65') throw new SealError(`unknown signature algorithm: ${s.alg}`);
+  }
+
   const hasMeta = m.host != null || m.exp != null || m.note != null || m.time != null || (m.sig?.length > 0);
   const flags = (env.t === 'text' ? 1 : 0) | (hasMeta ? 2 : 0) | (env.thr ? 4 : 0);
   out.push(BINARY_VERSION, flags);
@@ -440,28 +563,34 @@ function binaryEncode(env) {
     if (m.time != null) mf |= 8;
     if (m.sig?.length) mf |= 16;
     out.push(mf);
-    if (m.host != null) {
-      const b = toBytes(m.host);
-      out.push(b.length, ...b);
+    if (hostBytes != null) {
+      out.push(hostBytes.length);
+      pushBytes(out, hostBytes);
     }
-    if (m.exp != null) out.push(...numBytes(Date.parse(m.exp), 6));
-    if (m.note != null) {
-      const b = toBytes(m.note);
-      out.push(...numBytes(b.length, 2), ...b);
+    if (expMs != null) out.push(...numBytes(expMs, 6));
+    if (noteBytes != null) {
+      out.push(...numBytes(noteBytes.length, 2));
+      pushBytes(out, noteBytes);
     }
     if (m.time != null) {
-      out.push(...numBytes(m.time.n, 6), ...b64uToBytes(m.time.salt));
+      out.push(...numBytes(m.time.n, 6));
+      pushBytes(out, timeSalt);
     }
-    if (m.sig?.length) {
-      out.push(m.sig.length);
-      for (const s of m.sig) {
-        out.push(s.alg === 'ed25519' ? 1 : s.alg === 'mldsa65' ? 2 : 0);
+    if (sigs.length) {
+      out.push(sigs.length);
+      for (const s of sigs) {
+        out.push(s.alg === 'ed25519' ? 1 : 2);
         const nb = toBytes(s.name);
-        out.push(nb.length, ...nb);
-        const pk = b64uToBytes(s.pk);
-        out.push(...numBytes(pk.length, 2), ...pk);
-        const sg = b64uToBytes(s.sig);
-        out.push(...numBytes(sg.length, 2), ...sg);
+        out.push(nb.length);
+        pushBytes(out, nb);
+        const pk = fieldBytes(s.pk, null, 'signer public key');
+        if (pk.length > 65535) throw new SealError('signer public key too long for the link format');
+        out.push(...numBytes(pk.length, 2));
+        pushBytes(out, pk);
+        const sg = fieldBytes(s.sig, null, 'signature');
+        if (sg.length > 65535) throw new SealError('signature too long for the link format');
+        out.push(...numBytes(sg.length, 2));
+        pushBytes(out, sg);
       }
     }
   }
@@ -469,40 +598,57 @@ function binaryEncode(env) {
   if (env.thr) out.push(env.thr.n, env.thr.m);
   out.push(env.wrap.length);
   for (const w of env.wrap) {
+    if (KIND_NUM[w.k] === undefined) throw new SealError(`malformed envelope: unknown wrapper kind ${w.k}`);
     out.push(KIND_NUM[w.k] | (w.direct ? 128 : 0));
     if (w.k === 'pass' || w.k === 'embed') {
-      const kd = w.kd;
+      const kd = w.kd ?? {};
       out.push(kd.algo === 'argon2id' ? (kd.m === 8192 && kd.t === 1 ? 1 : 0) : 2);
       if (kd.algo !== 'argon2id') out.push(...numBytes(kd.i ?? 210000, 4));
-      out.push(...b64uToBytes(w.s));
-      if (!w.direct) out.push(...b64uToBytes(w.ct));
+      pushBytes(out, fieldBytes(w.s, 16, 'password salt'));
+      if (!w.direct) pushBytes(out, fieldBytes(w.ct, 48, 'wrapped key'));
     } else if (w.k === 'prf') {
-      out.push(...b64uToBytes(w.s));
-      const cid = b64uToBytes(w.cid);
-      out.push(cid.length, ...cid);
-      if (!w.direct) out.push(...b64uToBytes(w.ct));
+      pushBytes(out, fieldBytes(w.s, 32, 'passkey salt'));
+      const cid = fieldBytes(w.cid, null, 'credential id');
+      if (cid.length > 255) throw new SealError('credential id too long for the link format');
+      out.push(cid.length);
+      pushBytes(out, cid);
+      if (!w.direct) pushBytes(out, fieldBytes(w.ct, 32, 'wrapped key'));
     } else if (w.k === 'pub') {
-      out.push(...b64uToBytes(w.x), ...b64uToBytes(w.m));
-      if (!w.direct) out.push(...b64uToBytes(w.ct));
+      pushBytes(out, fieldBytes(w.x, 32, 'ephemeral public key'));
+      pushBytes(out, fieldBytes(w.m, MLKEM_CT_LEN, 'ML-KEM ciphertext'));
+      if (!w.direct) pushBytes(out, fieldBytes(w.ct, 48, 'wrapped key'));
     }
-    if (env.thr) out.push(w.xi);
+    if (env.thr) {
+      if (!Number.isInteger(w.xi) || w.xi < 1 || w.xi > 255) {
+        throw new SealError('malformed envelope: bad share index');
+      }
+      out.push(w.xi);
+    }
   }
 
-  const p = b64uToBytes(env.payload.ct);
-  out.push(...numBytes(p.length, 2), ...p);
+  out.push(...numBytes(payloadBytes.length, 2));
+  pushBytes(out, payloadBytes);
   return new Uint8Array(out);
 }
 
 function binaryReader(bytes) {
   let off = 0;
+  const need = (n) => {
+    if (off + n > bytes.length) throw new SealError('malformed link: truncated envelope');
+  };
   return {
-    u8: () => bytes[off++],
+    u8: () => {
+      need(1);
+      return bytes[off++];
+    },
     bytes: (n) => {
+      need(n);
       const s = bytes.subarray(off, off + n);
       off += n;
       return s;
     },
     num: (n) => {
+      need(n);
       let v = 0;
       for (let i = 0; i < n; i++) v = v * 256 + bytes[off++];
       return v;
@@ -528,7 +674,7 @@ function binaryDecode(bytes) {
       for (let i = 0; i < count; i++) {
         const alg = r.u8();
         env.meta.sig.push({
-          alg: alg === 2 ? 'mldsa65' : 'ed25519',
+          alg: alg === 1 ? 'ed25519' : alg === 2 ? 'mldsa65' : 'unknown',
           name: toStr(r.bytes(r.u8())),
           pk: bytesToB64u(r.bytes(r.num(2))),
           sig: bytesToB64u(r.bytes(r.num(2))),
@@ -538,6 +684,9 @@ function binaryDecode(bytes) {
   }
   if (flags & 4) env.thr = { n: r.u8(), m: r.u8() };
   const wc = r.u8();
+  if (env.thr && wc !== env.thr.n) {
+    throw new SealError('malformed link: threshold count does not match wrapper count');
+  }
   for (let i = 0; i < wc; i++) {
     const b = r.u8();
     const direct = !!(b & 128);
@@ -548,7 +697,8 @@ function binaryDecode(bytes) {
       const kdFlag = r.u8();
       if (kdFlag === 0) w.kd = { algo: 'argon2id', m: 65536, t: 3, p: 1 };
       else if (kdFlag === 1) w.kd = { algo: 'argon2id', m: 8192, t: 1, p: 1 };
-      else w.kd = { algo: 'pbkdf2', i: r.num(4), hash: 'SHA-256' };
+      else if (kdFlag === 2) w.kd = { algo: 'pbkdf2', i: r.num(4), hash: 'SHA-256' };
+      else throw new SealError('malformed link: unknown KDF id');
       w.s = bytesToB64u(r.bytes(16));
       if (!direct) w.ct = bytesToB64u(r.bytes(48));
     } else if (kind === 'prf') {
@@ -564,6 +714,7 @@ function binaryDecode(bytes) {
     env.wrap.push(w);
   }
   env.payload.ct = bytesToB64u(r.bytes(r.num(2)));
+  if (!r.done()) throw new SealError('malformed link: trailing bytes after payload');
   return env;
 }
 
@@ -576,34 +727,83 @@ export async function encodeEnvelope(env, opts = {}) {
   return BINARY_PREFIX + bytesToB64u(binaryEncode(env));
 }
 
-export async function decodeEnvelope(str) {
-  if (str.startsWith(BINARY_PREFIX)) {
-    str = str.slice(BINARY_PREFIX.length);
-    return binaryDecode(b64uToBytes(str));
+// Post-decode sanity: every decoding path (JSON v3, compact v4/v5, binary v6)
+// funnels through here so a malformed envelope fails closed with a friendly
+// SealError instead of a stray TypeError three functions later.
+const KNOWN_KINDS = new Set(['pass', 'embed', 'prf', 'pub']);
+function validateEnvelope(env) {
+  if (!env || typeof env !== 'object') throw new SealError('malformed link');
+  if (env.t !== 'url' && env.t !== 'text') throw new SealError('malformed link: bad payload type');
+  if (!Array.isArray(env.wrap) || env.wrap.length === 0) {
+    throw new SealError('malformed link: no unlock methods');
   }
-  if (str.startsWith(COMPACT_PREFIX)) {
-    str = str.slice(COMPACT_PREFIX.length);
-    const raw = b64uToBytes(str);
-    const flag = raw[0];
-    const bytes = await inflateMaybe(flag, raw.subarray(1));
-    const env = expandCompact(JSON.parse(toStr(bytes)), COMPACT_VERSION);
-    return env;
+  if (env.wrap.length > MAX_WRAPPERS) {
+    throw new SealError(`malformed link: too many unlock methods (max ${MAX_WRAPPERS})`);
   }
-  if (str.startsWith(LEGACY_COMPACT_PREFIX)) {
-    str = str.slice(LEGACY_COMPACT_PREFIX.length);
-    const raw = b64uToBytes(str);
-    const flag = raw[0];
-    const bytes = await inflateMaybe(flag, raw.subarray(1));
-    const env = expandCompact(JSON.parse(toStr(bytes)), LEGACY_COMPACT_VERSION);
-    return env;
+  for (const w of env.wrap) {
+    if (!w || typeof w !== 'object' || !KNOWN_KINDS.has(w.k)) {
+      throw new SealError('malformed link: unknown unlock method');
+    }
   }
-  if (str.startsWith(PREFIX)) str = str.slice(PREFIX.length);
-  const raw = b64uToBytes(str);
-  const flag = raw[0];
-  const bytes = await inflateMaybe(flag, raw.subarray(1));
-  const env = JSON.parse(toStr(bytes));
-  if (env.v !== VERSION) throw new SealError(`unsupported envelope version: ${env.v}`);
+  if (env.payload == null || typeof env.payload.ct !== 'string' || !env.payload.ct) {
+    throw new SealError('malformed link: missing payload');
+  }
+  if (env.meta != null && typeof env.meta !== 'object') {
+    throw new SealError('malformed link: bad metadata');
+  }
+  if (env.meta?.sig != null && !Array.isArray(env.meta.sig)) {
+    throw new SealError('malformed link: bad signatures');
+  }
+  if (env.meta?.time != null) {
+    const t = env.meta.time;
+    if (typeof t.salt !== 'string' || !Number.isFinite(t.n) || t.n < 1) {
+      throw new SealError('malformed link: bad time-lock');
+    }
+    if (t.n > MAX_TIMELOCK_N) {
+      throw new SealError('this link claims an unreasonable time-lock — refusing to grind');
+    }
+  }
+  if (env.thr) {
+    const { n, m } = env.thr;
+    if (!Number.isInteger(n) || !Number.isInteger(m) || m < 1 || m > n || n !== env.wrap.length) {
+      throw new SealError('malformed link: bad threshold');
+    }
+    const seen = new Set();
+    for (const w of env.wrap) {
+      if (!Number.isInteger(w.xi) || w.xi < 1 || w.xi > n || seen.has(w.xi)) {
+        throw new SealError('malformed link: bad share index');
+      }
+      seen.add(w.xi);
+    }
+  }
   return env;
+}
+
+export async function decodeEnvelope(str) {
+  try {
+    let env;
+    if (str.startsWith(BINARY_PREFIX)) {
+      env = binaryDecode(b64uToBytes(str.slice(BINARY_PREFIX.length)));
+    } else if (str.startsWith(COMPACT_PREFIX)) {
+      const raw = b64uToBytes(str.slice(COMPACT_PREFIX.length));
+      const bytes = await inflateMaybe(raw[0], raw.subarray(1));
+      env = expandCompact(JSON.parse(toStr(bytes)), COMPACT_VERSION);
+    } else if (str.startsWith(LEGACY_COMPACT_PREFIX)) {
+      const raw = b64uToBytes(str.slice(LEGACY_COMPACT_PREFIX.length));
+      const bytes = await inflateMaybe(raw[0], raw.subarray(1));
+      env = expandCompact(JSON.parse(toStr(bytes)), LEGACY_COMPACT_VERSION);
+    } else {
+      const body = str.startsWith(PREFIX) ? str.slice(PREFIX.length) : str;
+      const raw = b64uToBytes(body);
+      const bytes = await inflateMaybe(raw[0], raw.subarray(1));
+      env = JSON.parse(toStr(bytes));
+      if (env.v !== VERSION) throw new SealError(`unsupported envelope version: ${env.v}`);
+    }
+    return validateEnvelope(env);
+  } catch (e) {
+    if (e instanceof SealError) throw e;
+    throw new SealError(`malformed link: ${e?.message ?? 'could not decode'}`);
+  }
 }
 
 // Deterministic serialization for signatures: fixed key order, no sigs.
@@ -723,26 +923,36 @@ async function tryUnwrap(w, creds, noIv) {
       bytes = await decrypt(key, b64uToBytes(w.ct));
     }
     return bytes ? { x: w.xi ?? 0, bytes } : null;
-  } catch {
+  } catch (e) {
+    if (isCancelError(e)) throw e; // cancelled passkey prompt ≠ wrong credential
     return null;
   }
 }
 
-// Direct mode: derive the payload key straight from the single credential.
-async function deriveDirectKey(w, creds) {
-  try {
-    if (w.k === 'pass' || w.k === 'embed') {
-      const pw = w.k === 'embed' ? creds.embeddedPassword : creds.password;
-      if (pw == null) return null;
-      return await deriveKey({ ...w.kd, s: w.s }, pw);
+// Direct mode: derive payload-key candidates straight from the single
+// credential. A password/embed wrapper may face several candidates (CLI
+// multi-password links); each gets its chance against the GCM tag in
+// open(). There is no wrap layer to verify against, so candidates cannot
+// be filtered here — only the payload decryption can tell them apart.
+async function deriveDirectKeys(w, creds) {
+  if (w.k === 'pass' || w.k === 'embed') {
+    const candidates = w.k === 'embed'
+      ? [creds.embeddedPassword, ...(creds.embeddedPasswords ?? [])]
+      : [creds.password, ...(creds.passwords ?? [])];
+    const keys = [];
+    for (const pw of candidates) {
+      if (pw == null) continue;
+      keys.push(await deriveKey({ ...w.kd, s: w.s }, pw));
     }
+    return keys;
+  }
+  try {
     if (w.k === 'prf') {
       const first = await (creds.prfAssertion ? creds.prfAssertion(w) : assertPasskey(w));
-      if (!first) return null;
-      return importAesKey(first);
+      return first ? [await importAesKey(first)] : [];
     }
     if (w.k === 'pub') {
-      if (!creds.privateKeys) return null;
+      if (!creds.privateKeys) return [];
       const { x25519Key, mlkemPriv } = await normalizePrivate(creds.privateKeys);
       const ssX = new Uint8Array(
         await crypto.subtle.deriveBits({ name: 'X25519', public: await importX25519Public(b64uToBytes(w.x)) }, x25519Key, 256)
@@ -750,12 +960,13 @@ async function deriveDirectKey(w, creds) {
       const { ml_kem768 } = await import('@noble/post-quantum/ml-kem.js');
       const ssM = new Uint8Array(await ml_kem768.decapsulate(b64uToBytes(w.m), mlkemPriv));
       const combined = await sha256(concatBytes(toBytes('x25519'), ssX, toBytes('mlkem768'), ssM));
-      return importAesKey(combined);
+      return [await importAesKey(combined)];
     }
-    return null;
-  } catch {
-    return null;
+  } catch (e) {
+    if (isCancelError(e)) throw e; // "user cancelled" is not "wrong credential"
+    return [];
   }
+  return [];
 }
 
 // ------------------------------------------------------------- passkeys
@@ -766,6 +977,23 @@ function webauthnOk() {
     navigator.credentials &&
     typeof globalThis.PublicKeyCredential !== 'undefined'
   );
+}
+
+// Ask an existing credential to evaluate the PRF extension. Throws the
+// raw WebAuthn error on cancellation (isCancelError); a missing PRF result
+// becomes a friendly SealError.
+async function evalPrf(credentialId, salt) {
+  const cred = await navigator.credentials.get({
+    publicKey: {
+      challenge: randomBytes(32).buffer,
+      allowCredentials: [{ id: credentialId.buffer, type: 'public-key' }],
+    },
+    extensions: { prf: { eval: { first: salt.buffer } } },
+  });
+  const ext = cred.getClientExtensionResults();
+  const first = ext?.prf?.results?.first;
+  if (!first) throw new SealError('this authenticator does not support the PRF extension');
+  return new Uint8Array(first);
 }
 
 async function enrollPasskey(salt) {
@@ -783,26 +1011,19 @@ async function enrollPasskey(salt) {
     },
     extensions: { prf: { eval: { first: salt.buffer } } },
   });
+  const credentialId = new Uint8Array(cred.rawId);
   const ext = cred.getClientExtensionResults();
   const first = ext?.prf?.results?.first;
-  if (!first) throw new SealError('this authenticator does not support the PRF extension');
-  return { first: new Uint8Array(first), credentialId: new Uint8Array(cred.rawId) };
+  if (first) return { first: new Uint8Array(first), credentialId };
+  // Two-step fallback: many authenticators only evaluate PRF on get(),
+  // not during creation. Verify the new credential can actually produce
+  // a PRF output before promising it will unlock anything.
+  return { first: await evalPrf(credentialId, salt), credentialId };
 }
 
 async function assertPasskey(w) {
   if (!webauthnOk()) throw new SealError('passkeys need a modern browser');
-  const salt = b64uToBytes(w.s);
-  const cred = await navigator.credentials.get({
-    publicKey: {
-      challenge: randomBytes(32).buffer,
-      allowCredentials: [{ id: b64uToBytes(w.cid).buffer, type: 'public-key' }],
-    },
-    extensions: { prf: { eval: { first: salt.buffer } } },
-  });
-  const ext = cred.getClientExtensionResults();
-  const first = ext?.prf?.results?.first;
-  if (!first) throw new SealError('authenticator returned no PRF result');
-  return new Uint8Array(first);
+  return evalPrf(b64uToBytes(w.cid), b64uToBytes(w.s));
 }
 
 // ------------------------------------------------------------ keypairs
@@ -987,7 +1208,11 @@ export async function seal(opts = {}) {
       /* keep going; open() will still show the confirm screen */
     }
   }
-  if (expiry) meta.exp = new Date(expiry).toISOString();
+  if (expiry) {
+    const t = new Date(expiry);
+    if (Number.isNaN(t.getTime())) throw new SealError('seal: expiry must be a valid date');
+    meta.exp = t.toISOString();
+  }
   if (note) meta.note = String(note);
   if (timeLock) meta.time = { salt: timeLock.saltB64 ?? bytesToB64u(timeLock.salt), n: timeLock.n };
 
@@ -1077,19 +1302,27 @@ export async function seal(opts = {}) {
 
 // ---------------------------------------------------------------- open
 
-// creds: { password?, embeddedPassword?, privateKeys? (keypair JSON), prfAssertion?: fn(w)=>bytes }
+// creds: { password?, passwords?, embeddedPassword?, embeddedPasswords?,
+//          privateKeys? (keypair JSON), prfAssertion?: fn(w)=>bytes }
+// opts:  { onProgress?: fn(done, total) — called while grinding a time-lock }
 // Returns { type, data, meta, env }. Throws SealError with a friendly message.
-export async function open(str, creds = {}) {
+export async function open(str, creds = {}, opts = {}) {
   const env = await decodeEnvelope(str);
   const noIv = env.v >= COMPACT_VERSION;
 
   // Direct mode fast path: single method, payload encrypted under its key.
   if (!env.thr && env.wrap?.length === 1 && env.wrap[0].direct) {
-    const key = await deriveDirectKey(env.wrap[0], creds);
-    if (!key) throw new SealError('None of the provided credentials unlocked this link');
-    const pt = await restorePayload(env.t, await aesDecryptNoIv(key, b64uToBytes(env.payload.ct)));
-    const data = toStr(pt);
-    return { type: env.t, data, meta: env.meta, env };
+    const keys = await deriveDirectKeys(env.wrap[0], creds);
+    const ct = b64uToBytes(env.payload.ct);
+    for (const key of keys) {
+      try {
+        const pt = await restorePayload(env.t, await aesDecryptNoIv(key, ct));
+        return { type: env.t, data: toStr(pt), meta: env.meta, env };
+      } catch {
+        /* wrong candidate — GCM tag failed, try the next */
+      }
+    }
+    throw new SealError('None of the provided credentials unlocked this link');
   }
 
   const fragments = [];
@@ -1129,7 +1362,9 @@ export async function open(str, creds = {}) {
     throw new SealError('None of the provided credentials unlocked this link');
   }
 
-  if (env.meta?.time) K = await hashChain(K, b64uToBytes(env.meta.time.salt), env.meta.time.n);
+  if (env.meta?.time) {
+    K = await hashChain(K, b64uToBytes(env.meta.time.salt), env.meta.time.n, opts.onProgress);
+  }
 
   const key = await importAesKey(K);
   const pt = await restorePayload(

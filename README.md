@@ -10,7 +10,7 @@ nothing, stores nothing, and *can* betray nothing.
 
 ```
 you                      the link                          the server
-"https://secret…"  →  s3.<salt>.<iv>.<ciphertext>…  →  serves one static HTML page.
+"https://secret…"  →  #s6.<binary envelope>…        →  serves one static HTML page.
 + password "hunter2"   (#fragment — never sent)          That's the whole product.
 ```
 
@@ -28,7 +28,7 @@ you                      the link                          the server
 - **Time-locks** — sequential SHA-256 grind before the payload opens (fair-use; see SECURITY).
 - **Signed seals** — Ed25519 + ML-DSA-65 hybrid signatures; "Sealed by Alice ✅".
 - **Secret text**, not just URLs — tokens, API keys, messages.
-- **Confirm screen + urlscan.io malware check** — anti-phishing by design, with an
+- **Confirm screen + Google Safe Browsing check** — anti-phishing by design, with an
   optional destination preview (Advanced toggle, off by default — the destination
   stays fully encrypted).
 - **Legacy support** — pre-v3 links still open.
@@ -36,7 +36,9 @@ you                      the link                          the server
   Slack slash command, Obsidian plugin** — all prefilling wrappers around the same page.
 - **Prove-it page** — ask the server to confess exactly what it saw.
 - **Optional premium mode** — server stores *ciphertext only* to add burn-after-read,
-  expiry enforcement, fetch counters, vanity slugs (see `docs/PREMIUM.md`).
+  expiry enforcement, fetch counters, vanity slugs, and short `/s/<slug>` links
+  (see `docs/PREMIUM.md`). When enabled, the result view offers a hosted short
+  link and the CLI's `--store` flag creates one.
 
 ## Quick start
 
@@ -48,12 +50,12 @@ git clone https://github.com/Edvin-Kjall/Magic-router.git
 cd Magic-router
 npm install
 npm run vendor     # build the local browser bundles (hash-wasm, noble PQ, qrcode)
-npm test           # 22 tests: crypto, thresholds, CLI, signatures, legacy
+npm test           # 69 tests: crypto, thresholds, CLI, signatures, legacy, worker
 npx wrangler deploy
 ```
 
 Then open your `*.workers.dev` URL. Create a link by typing a destination + password;
-open any `/#s3.…` link to unlock it.
+open any `/#s6.…` link to unlock it.
 
 ## Usage
 
@@ -68,9 +70,11 @@ page fetch.
 npx seal create --url https://example.com/private --password "correct horse" --host https://your-host.workers.dev
 npx seal create --text "$API_KEY" --embed "pw" --delay 2h --sign alice.json
 npx seal create --url https://x --password a --password b --threshold 2 --qr
-npx seal open 'https://your-host.workers.dev/#s3.…' --password "correct horse"
+npx seal open 'https://your-host.workers.dev/#s6.…' --password "correct horse"
 npx seal keygen --recipient      # → seal-key.json (hybrid X25519 + ML-KEM-768)
 npx seal keygen --identity alice # → seal-identity-alice.json
+npx seal create --url https://x --password pw --host https://h --store --burn  # hosted /s/ link (premium)
+npx seal open https://h/s/<slug> --password pw    # hosted links open directly
 npx seal info <link>
 npx seal passphrase              # 8-word EFF passphrase, ~103 bits
 ```
@@ -83,7 +87,8 @@ CLI links open in the browser and vice versa — one format everywhere.
    (AES-256-GCM). K is then wrapped once per unlock method — e.g. encrypted under a
    key derived from the password (Argon2id), XORed with a passkey PRF output, or
    encapsulated to a hybrid X25519+ML-KEM-768 public key. The whole envelope is
-   compressed, base64url-encoded, and appended to the URL as `#s3.…`.
+   compressed, base64url-encoded, and appended to the URL as `#s6.…` (a compact
+   binary envelope; older `s3.`–`s5.` links still decode).
 2. **Opening**: the page reads the fragment, asks for the credential(s), unwraps K
    (reconstructing it via Shamir if m-of-n), grinds the time-lock if set, decrypts,
    verifies any signatures, and shows a confirm screen before redirecting.
@@ -91,7 +96,8 @@ CLI links open in the browser and vice versa — one format everywhere.
    password, or the destination. It has nothing to log, leak, or hand over.
 
 Wrong credentials make the GCM tag fail — there is no oracle, and no server to
-rate-limit against, so use long passphrases (the 🎲 button generates ~103-bit ones).
+rate-limit against, so use long passphrases (the "suggest a strong passphrase"
+button generates ~103-bit ones).
 
 ## Quantum security
 
@@ -113,10 +119,12 @@ site/public/            the single-page app + lib + vendor bundles + EFF wordlis
 site/public/lib/        shared crypto core (envelope, shamir, timelock, kd, …)
 cli/seal.mjs            the CLI (same lib, Node 20+)
 spec/ENVELOPE.md        the link format, formally
+docs/ARCHITECTURE.md    the full project map
 docs/PREMIUM.md         the optional stateful tier (ciphertext-only)
+docs/UPGRADES.md        the production-readiness audit and what was done
 docs/INTEGRATIONS.md    bookmarklet / Raycast / iOS / Slack / Obsidian
 integrations/           those integrations
-tests/                  node:test suites (22 tests)
+tests/                  node:test suites (69 tests)
 ```
 
 ## Honest limits

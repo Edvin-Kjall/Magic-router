@@ -31,15 +31,29 @@ async function nodeSha() {
 }
 
 // iterations sequential SHA-256 rounds: h0 = H(seed||salt), hi = H(h{i-1}||salt)
-export async function hashChain(seed, salt, iterations) {
+// onProgress(done, total) is called periodically so callers can paint a
+// progress bar; the browser path yields a macrotask per tick so the page
+// actually repaints during a long grind.
+export async function hashChain(seed, salt, iterations, onProgress) {
   const node = await nodeSha();
   if (node) {
     let h = node.createHash('sha256').update(seed).update(salt).digest();
-    for (let i = 1; i < iterations; i++) h = node.createHash('sha256').update(h).update(salt).digest();
+    for (let i = 1; i < iterations; i++) {
+      h = node.createHash('sha256').update(h).update(salt).digest();
+      if (onProgress && i % 65536 === 0) onProgress(i, iterations);
+    }
+    onProgress?.(iterations, iterations);
     return new Uint8Array(h);
   }
   let h = await sha256(concatBytes(seed, salt));
-  for (let i = 1; i < iterations; i++) h = await sha256(concatBytes(h, salt));
+  for (let i = 1; i < iterations; i++) {
+    h = await sha256(concatBytes(h, salt));
+    if (onProgress && i % 4096 === 0) {
+      onProgress(i, iterations);
+      await new Promise((r) => setTimeout(r, 0)); // let the UI paint
+    }
+  }
+  onProgress?.(iterations, iterations);
   return h;
 }
 

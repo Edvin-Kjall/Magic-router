@@ -72,6 +72,12 @@ that does and does not buy you.
 - **The page is JavaScript.** You must trust the code you loaded — which is why the
   whole product is auditable in a coffee break: one HTML file, one JS app, one small
   worker, no CDN, no remote scripts, and a strict CSP. Pin and audit it.
+- **Crafted links get bounded work, not a frozen tab.** Decoders enforce hard caps:
+  ≤ 64 unlock methods, ≤ 4 MiB after inflation, time-locks ≤ 2⁴² rounds — so a
+  hostile link cannot turn your browser into an Argon2id farm or a memory bomb.
+- **Premium short-redirect mode is opt-in** (`ALLOW_REDIRECTS`). Off by default
+  because an unauthenticated plaintext redirector on a trusted domain invites
+  phishing abuse.
 
 ## Reporting
 

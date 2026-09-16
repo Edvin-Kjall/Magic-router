@@ -6,8 +6,24 @@
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-91upTlZrgX2HiD61+O4vyhg8kRh74N2en0v/hJKa/rQ=' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
   <meta name="description" content="Encrypted links that store themselves. No database, no tracking — the link carries its own AES-256-GCM encrypted destination.">
-  <title>Magic Router</title>
+  <title>Magic Router — send a link only they can open</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="mask-icon" href="/favicon.svg" color="#000000">
+  <link rel="manifest" href="/site.webmanifest">
+  <meta name="theme-color" content="#000000">
+  <meta property="og:site_name" content="Magic Router">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Magic Router — send a link only they can open">
+  <meta property="og:description" content="Encrypted links that store themselves. AES-256-GCM in the URL fragment — the server never sees a thing.">
+  <meta property="og:url" content="https://magic-router.uyj4cywb9launwtippwp.workers.dev/">
+  <meta property="og:image" content="https://magic-router.uyj4cywb9launwtippwp.workers.dev/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Magic Router — send a link only they can open">
+  <meta name="twitter:description" content="Encrypted links that store themselves. The server never sees a thing.">
+  <meta name="twitter:image" content="https://magic-router.uyj4cywb9launwtippwp.workers.dev/og.png">
   <link rel="stylesheet" href="/style.css">
   <script type="importmap">
   {
@@ -78,11 +94,22 @@
           </div>
           <button id="qr-toggle" class="text-btn" type="button">Show QR code</button>
           <canvas id="qr-canvas" width="240" height="240" title="QR code of the link" hidden></canvas>
+          <button id="host-btn" class="text-btn" type="button" hidden>
+            Get a short hosted link — the server stores ciphertext only
+          </button>
+          <p id="hosted-err" class="err" hidden></p>
+          <div id="hosted-row" hidden>
+            <label class="field">
+              <span class="field-label">Hosted short link</span>
+              <input id="hosted-out" type="text" readonly>
+            </label>
+            <div class="row-actions">
+              <button id="hosted-copy" class="ghost small-btn">Copy hosted link</button>
+            </div>
+          </div>
         </div>
       </div>
-      <p class="footnote">Your link and password never reach our server. Ever. <a id="footer-prove" href="#">See for yourself</a>.<br>
-        Sharing a file instead? Seal the <a href="https://send.tresorit.com/" target="_blank" rel="noopener noreferrer">Tresorit Send</a>
-        link here — the result looks like any other link.</p>
+      <p class="footnote">Your link and password never reach our server. Ever. <a id="footer-prove" href="#">See for yourself</a>.</p>
     </section>
 
     <!-- ============ OPEN ============ -->
@@ -130,6 +157,7 @@
           <textarea id="result-text" rows="5" readonly></textarea>
           <button id="result-text-copy" class="ghost">Copy</button>
         </div>
+        <p id="burn-note" class="warn small" hidden>This link burned after this fetch — it will not open again.</p>
       </div>
 
       <div class="hero" id="open-gone" hidden>
@@ -208,10 +236,10 @@
           <span class="field-label">Public note — shown before unlocking</span>
           <input id="adv-note" type="text" placeholder="e.g. For Alice — the thing we discussed">
         </label>
-        <div class="switch-row">
+        <label class="switch-row">
           <span class="switch-copy"><strong>Sign the link as you</strong><small>Recipients see "sealed by you ✓" with Ed25519 + ML-DSA-65 signatures.</small></span>
           <input type="checkbox" id="adv-sign"><span class="switch"></span>
-        </div>
+        </label>
         <div class="indent" id="adv-sign-row" hidden>
           <label class="field"><span class="field-label">Name</span>
             <input id="adv-identity-name" type="text" placeholder="Your handle"></label>
@@ -240,6 +268,10 @@
           <span class="switch-copy"><strong>Path-style link</strong><small>Survives apps that strip <code>#fragments</code>. The server then sees the ciphertext (still can't read it).</small></span>
           <input type="checkbox" id="adv-path"><span class="switch"></span>
         </label>
+        <label class="switch-row">
+          <span class="switch-copy"><strong>Burn after first read</strong><small>Only applies to hosted short links — the stored envelope deletes itself after one fetch.</small></span>
+          <input type="checkbox" id="adv-burn"><span class="switch"></span>
+        </label>
       </div>
     </section>
 
@@ -252,33 +284,6 @@
           and browsers never send fragments to servers.</p>
         <button id="prove-btn" class="primary">Run the check</button>
         <pre id="prove-out" hidden></pre>
-      </div>
-      <div class="panel">
-        <h2>Sharing files?</h2>
-        <p>Magic Router seals links and text. For files, use
-          <a href="https://send.tresorit.com/" target="_blank" rel="noopener noreferrer">Tresorit Send</a> —
-          the same philosophy: the file is end-to-end encrypted, and the link reveals nothing about it.</p>
-        <ol class="howto">
-          <li>Open <a href="https://send.tresorit.com/" target="_blank" rel="noopener noreferrer">send.tresorit.com</a> — no account needed.</li>
-          <li>Drop in your file (or files).</li>
-          <li>Optionally set a password, an expiry date, or a download limit.</li>
-          <li>You get an opaque link like <code>https://send.tresorit.com/a#JHTd1HozVommR83n43VJLg</code> —
-            it does not show the file name, size, or contents.</li>
-          <li>Share the link. Send the password (if you set one) separately — same rule as here.</li>
-        </ol>
-        <p class="hint">Encryption happens in your browser before anything is uploaded; Tresorit never sees the file contents.</p>
-
-        <div class="seal-nested">
-          <h2>Make it unidentifiable</h2>
-          <p>Even a Tresorit link still <em>says</em> "send.tresorit.com" — a giveaway that it's a file.
-            Seal it here instead: the result is indistinguishable from any other Magic Router link.
-            Nobody can tell it's a file, or which service is behind it.</p>
-          <label class="field">
-            <span class="field-label">Paste your Tresorit Send link</span>
-            <input id="tresorit-link-in" type="text" placeholder="https://send.tresorit.com/a#…">
-          </label>
-          <button id="seal-tresorit-btn" class="primary" type="button">Seal this link →</button>
-        </div>
       </div>
       <div class="panel faq">
         <h2>Where is my data stored?</h2>

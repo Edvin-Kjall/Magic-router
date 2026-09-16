@@ -26,6 +26,8 @@ Worker verifies the request and answers; it stores nothing.
 - verifies the `x-slack-signature` HMAC (SHA-256 over `v0:<ts>:<body>`)
   with the signing secret, rejects requests older than 5 minutes;
 - extracts the first URL from the command text;
-- replies with an ephemeral Slack message linking to `/?url=<url>`.
+- replies with an ephemeral Slack message linking to `/#prefill=<url>` (the
+  fragment is never sent to the Worker, so the destination stays off the
+  server).
 
 No Slack message content is stored by the Worker.

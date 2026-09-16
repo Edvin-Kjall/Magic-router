@@ -8,9 +8,24 @@ binding = "ASSETS"
 not_found_handling = "single-page-application"
 run_worker_first = [ "/api/*" ]
 
+# Workers Logs + Traces for production visibility. Safe here by design:
+# the worker can only ever log paths and headers — sealed data lives in
+# URL fragments, which never reach the server. Traces sampled at 1%.
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.01
+
 [vars]
 PREMIUM = "false"
 # PUBLIC_HOST = "https://your-domain.example"   # for Slack links + premium URLs
+# ALLOW_REDIRECTS = "true"  # premium plaintext short-redirect mode (open
+                           # redirector — opt in deliberately, see docs/PREMIUM.md)
 
 # --- Optional premium mode (stateful, ciphertext only) ---
 # See docs/PREMIUM.md. Create the namespace, paste its id, uncomment:

@@ -9,7 +9,7 @@ import {
   encodeEnvelope,
   decodeEnvelope,
   splitEmbedded,
-  isSealedLink,
+  extractLinkFragment,
   isPlainLink,
   encodePlainUrl,
   decodePlainUrl,
@@ -20,6 +20,7 @@ import {
   makeTimeLock,
   parseDuration,
   expiryStatus,
+  isCancelError,
   SealError,
 } from './lib/envelope.js';
 import { estimateHashRate, formatDuration } from './lib/timelock.js';
@@ -36,8 +37,19 @@ const $ = (id) => document.getElementById(id);
 let hashRate = 0;
 let signerIdentity = null; // { name, ed25519, mldsa65 }
 let currentLink = null; // { str, env?, tail, mode, hostedMeta? }
-let wordlist = null;
 let qrRendered = false;
+let premiumOn = false; // /api/health said this instance can host links
+
+async function checkPremium() {
+  try {
+    const res = await fetch('/api/health');
+    if (!res.ok) return;
+    const h = await res.json();
+    premiumOn = h.premium === true;
+  } catch {
+    /* static host — no API */
+  }
+}
 
 // ------------------------------------------------------------- helpers
 
@@ -73,14 +85,34 @@ function download(name, text) {
 
 // ------------------------------------------------------------ diceware
 
+let wordlistPromise = null;
+
 async function loadWordlist() {
-  if (wordlist) return wordlist;
-  let res = await fetch('/eff-large.txt');
-  if (!res.ok) res = await fetch('/data/eff-large.txt');
-  if (!res.ok) throw new Error('wordlist unavailable');
-  const text = await res.text();
-  wordlist = text.split('\n').map((l) => l.split('\t')[1]).filter(Boolean);
-  return wordlist;
+  if (!wordlistPromise) {
+    wordlistPromise = (async () => {
+      // The Worker serves the list from /data/; the flat dist-drop build has
+      // it at the root. SPA fallbacks answer 200 with HTML for missing
+      // files, so trust the content type and the list size, not res.ok.
+      for (const p of ['/data/eff-large.txt', '/eff-large.txt']) {
+        try {
+          const res = await fetch(p);
+          const ct = res.headers.get('content-type') ?? '';
+          if (!res.ok || /html/i.test(ct)) continue;
+          const list = (await res.text()).split('\n').map((l) => l.split('\t')[1]).filter(Boolean);
+          if (list.length >= 7000) return list; // EFF large wordlist = 7776
+        } catch {
+          /* try the next location */
+        }
+      }
+      throw new SealError('passphrase wordlist unavailable');
+    })();
+    // A failed load must not cache the failure (and must not surface as an
+    // unhandled rejection when the caller below handles it).
+    wordlistPromise.catch(() => {
+      wordlistPromise = null;
+    });
+  }
+  return wordlistPromise;
 }
 
 function diceRoll() {
@@ -116,6 +148,7 @@ function activeAdvanced() {
   if ($('adv-path').checked) out.push('Path-style');
   if ($('adv-preview').checked) out.push('Preview');
   if ($('adv-plain').checked) out.push('Short (no encryption)');
+  if ($('adv-burn').checked) out.push('Burn after read');
   return out;
 }
 
@@ -131,7 +164,7 @@ function updateAdvancedSummary() {
 }
 
 function clearAdvanced() {
-  for (const id of ['adv-prf', 'adv-pub', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-sign-pq', 'adv-path', 'adv-preview', 'adv-plain']) {
+  for (const id of ['adv-prf', 'adv-pub', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-sign-pq', 'adv-path', 'adv-preview', 'adv-plain', 'adv-burn']) {
     $(id).checked = false;
   }
   $('adv-timelock').value = 'off';
@@ -252,6 +285,9 @@ async function onCreate(e) {
       void orb.offsetWidth;
       orb.classList.add('stamping');
       $('share-btn').hidden = typeof navigator.share !== 'function';
+      $('host-btn').hidden = true;
+      $('hosted-row').hidden = true;
+      $('hosted-err').hidden = true;
       return;
     }
     const { opts, tl } = buildSealOpts();
@@ -259,7 +295,10 @@ async function onCreate(e) {
       opts.recipient = JSON.parse(await opts.recipient.text());
     }
     if (tl !== 'off') {
-      opts.timeLock = await makeTimeLock(parseDuration(tl), hashRate || 1e6);
+      // hashRate warms up in the background; if the user seals a time-locked
+      // link before it's ready, measure now rather than assume 1M h/s.
+      const rate = hashRate || (await estimateHashRate().catch(() => 1e6));
+      opts.timeLock = await makeTimeLock(parseDuration(tl), rate);
     }
     if ($('adv-preview').checked) opts.preview = true;
     if ($('adv-expiry').value) opts.expiry = $('adv-expiry').value;
@@ -287,6 +326,11 @@ async function onCreate(e) {
     qrRendered = false;
     $('qr-canvas').hidden = true;
     $('qr-toggle').textContent = 'Show QR code';
+    // Hosted short links need premium AND can never carry an embedded
+    // password (the tail must never reach the server).
+    $('host-btn').hidden = !(premiumOn && opts.embedded == null);
+    $('hosted-row').hidden = true;
+    $('hosted-err').hidden = true;
     const orb = $('seal-orb');
     orb.classList.remove('stamping');
     void orb.offsetWidth;
@@ -309,6 +353,9 @@ function resetCreate() {
   $('pw-toggle').textContent = '👁';
   $('create-err').hidden = true;
   $('seal-orb').classList.remove('stamping');
+  $('host-btn').hidden = true;
+  $('hosted-row').hidden = true;
+  $('hosted-err').hidden = true;
 }
 
 // --------------------------------------------------------------- open
@@ -316,14 +363,33 @@ function resetCreate() {
 function detectLink() {
   const path = location.pathname;
   if (path.startsWith('/s/') && path.length > 3) {
-    return { mode: 'hosted', slug: decodeURIComponent(path.slice(3)) };
+    let slug = path.slice(3);
+    try {
+      slug = decodeURIComponent(slug);
+    } catch {
+      /* keep raw */
+    }
+    return { mode: 'hosted', slug };
   }
   const frag = location.hash.slice(1);
-  if (frag) return { mode: 'self', str: frag };
+  // '#prefill=' is a destination prefill, not a link to open.
+  if (frag && !frag.startsWith('prefill=')) return { mode: 'self', str: frag };
   if (path.startsWith('/_u/') && path.length > 4) {
-    return { mode: 'self', str: decodeURIComponent(path.slice(4)) };
+    return { mode: 'self', str: path.slice(4) };
   }
   return null;
+}
+
+// Redirect only to real http(s) destinations. Envelope contents are
+// attacker-controllable (anyone can craft an encrypted link), so a
+// javascript:/data: payload must never reach location.replace — even with
+// CSP as the second line of defense.
+function safeRedirect(url) {
+  if (/^https?:\/\//i.test(url)) {
+    location.replace(url);
+    return true;
+  }
+  return false;
 }
 
 async function route() {
@@ -348,25 +414,20 @@ async function route() {
       const body = await res.json();
       // Premium short slugs: plaintext redirect, no unlock step.
       if (body.redirect) {
-        location.replace(body.redirect);
+        safeRedirect(body.redirect);
         return;
       }
       currentLink = { str: body.envelope, tail: null, mode: 'hosted', hostedMeta: body.meta };
       await beginOpen(body.envelope, null, body.meta);
     } else {
-      let str = link.str;
-      try {
-        str = decodeURIComponent(str);
-      } catch {
-        /* keep raw */
-      }
+      // extractLinkFragment percent-decodes at most once, and never for
+      // plain (u0.–u3.) links — their bodies carry their own %23/%25
+      // escapes, and pre-decoding them would corrupt the destination.
+      const str = extractLinkFragment(link.str);
       // Stateless short mode: unencrypted, compressed URL — open instantly.
       if (isPlainLink(str)) {
         const url = await decodePlainUrl(str);
-        if (/^https?:\/\//i.test(url)) {
-          location.replace(url);
-          return;
-        }
+        if (safeRedirect(url)) return;
         showView('create');
         return;
       }
@@ -426,6 +487,7 @@ async function beginOpen(envStr, tail, hostedMeta) {
       : ` · expires ${new Date(ex.at).toLocaleDateString()}`;
   }
   if (hostedMeta?.fetches != null) $('open-exp').textContent += ` · opened ${hostedMeta.fetches}×`;
+  if (hostedMeta?.burnt) $('open-exp').textContent += ' · burns after this open';
 
   const sigs = await verifySignatures(env);
   $('open-sig-results').hidden = !sigs.length;
@@ -463,7 +525,10 @@ async function beginOpen(envStr, tail, hostedMeta) {
       // Auto-open mode: the password traveled in the link, so redirect
       // straight to the destination. Secret text still shows here.
       if (r.type === 'url') {
-        location.replace(r.data);
+        if (!safeRedirect(r.data)) {
+          err(new SealError('This link does not contain a valid https:// destination'), 'open');
+          $('open-form').hidden = false;
+        }
         return;
       }
       showResult(r, env);
@@ -492,21 +557,35 @@ async function doOpen(envStr, env) {
   }
 
   const tl = env.meta?.time;
+  // Keep the buttons dead for the whole attempt — a double submit would
+  // otherwise run two Argon2id derivations (or two passkey prompts).
+  $('open-btn').disabled = true;
+  $('open-passkey-btn').disabled = true;
   if (tl) {
     $('timelock-box').hidden = false;
     $('timelock-eta').textContent = hashRate
       ? `about ${formatDuration((tl.n / hashRate) * 1000)}`
       : 'a little while';
-    $('open-btn').disabled = true;
-    $('open-passkey-btn').disabled = true;
   }
   try {
-    const r = await open(envStr, creds);
+    const r = await open(envStr, creds, {
+      onProgress: tl
+        ? (done, total) => {
+            $('timelock-bar').style.width = `${Math.min(100, (done / total) * 100)}%`;
+            if (hashRate) {
+              $('timelock-eta').textContent =
+                `about ${formatDuration(((total - done) / hashRate) * 1000)} left`;
+            }
+          }
+        : undefined,
+    });
     showResult(r, env);
   } catch (e2) {
-    err(e2, 'open');
+    // A dismissed passkey prompt is not an error — stay quiet.
+    if (!isCancelError(e2)) err(e2, 'open');
   } finally {
     $('timelock-box').hidden = true;
+    $('timelock-bar').style.width = '0';
     $('open-btn').disabled = false;
     $('open-passkey-btn').disabled = false;
   }
@@ -517,6 +596,7 @@ function showResult(r, env) {
   $('open-form').hidden = true;
   $('open-passkey-btn').hidden = true;
   $('open-result').hidden = false;
+  $('burn-note').hidden = !currentLink?.hostedMeta?.burnt;
   const orb = $('seal-orb-open');
   orb.classList.add('broken');
   if (r.type === 'url') {
@@ -530,7 +610,13 @@ function showResult(r, env) {
       /* raw string */
     }
     $('continue-host').textContent = host;
-    $('continue-btn').onclick = () => location.replace(r.data);
+    const isHttpUrl = /^https?:\/\//i.test(r.data);
+    $('continue-btn').disabled = !isHttpUrl;
+    $('continue-btn').onclick = () => {
+      if (!safeRedirect(r.data)) {
+        err(new SealError('Refusing to open: destination is not an http(s) URL'), 'open');
+      }
+    };
     // Google Safe Browsing — official Google verdict for the exact URL,
     // free, no account. Opens in a new tab with no referrer.
     $('scan-btn').onclick = () => {
@@ -544,9 +630,16 @@ function showResult(r, env) {
     $('result-url-wrap').hidden = true;
     $('result-text-wrap').hidden = false;
     $('result-text').value = r.data;
-    $('result-text-copy').onclick = () => {
-      navigator.clipboard.writeText(r.data);
-      $('result-text-copy').textContent = 'Copied ✓';
+    $('result-text-copy').onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(r.data);
+        $('result-text-copy').textContent = 'Copied ✓';
+      } catch {
+        // Clipboard API denied (permissions, embedded context): select the
+        // text so Ctrl+C still works.
+        $('result-text').select();
+        $('result-text-copy').textContent = 'Press Ctrl+C';
+      }
     };
   }
 }
@@ -579,6 +672,10 @@ function bindStatic() {
     b.addEventListener('click', () => showView(b.dataset.view));
   });
 
+  // Pasting a link over an already-open page only changes the hash —
+  // re-route so it actually opens instead of sitting on the current view.
+  window.addEventListener('hashchange', () => route());
+
   $('footer-repo').href = CFG.repo;
   $('footer-spec').href = CFG.file('spec/ENVELOPE.md');
   $('footer-security').href = CFG.file('SECURITY.md');
@@ -587,19 +684,6 @@ function bindStatic() {
     showView('about');
   });
   $('prove-btn').addEventListener('click', runProve);
-
-  // Tresorit Send: jump to Create with the file link prefilled
-  $('seal-tresorit-btn').addEventListener('click', () => {
-    const v = $('tresorit-link-in').value.trim();
-    if (!/^https?:\/\//i.test(v)) {
-      $('tresorit-link-in').focus();
-      return;
-    }
-    showView('create');
-    $('payload').value = v;
-    $('payload').scrollIntoView({ behavior: 'smooth', block: 'center' });
-    $('pw').focus();
-  });
 
   // create
   $('create-form').addEventListener('submit', onCreate);
@@ -635,20 +719,61 @@ function bindStatic() {
   $('qr-toggle').addEventListener('click', async () => {
     const canvas = $('qr-canvas');
     if (canvas.hidden) {
+      if (!qrRendered) {
+        try {
+          await toCanvas(canvas, $('link-out').value, { width: 240, margin: 1 });
+          qrRendered = true;
+        } catch {
+          // Rich links (signed, PQ) can exceed QR capacity — say so instead
+          // of dying with an unhandled rejection and an empty canvas.
+          $('qr-toggle').textContent = 'Link too long for a QR code';
+          return;
+        }
+      }
       canvas.hidden = false;
       $('qr-toggle').textContent = 'Hide QR code';
-      if (!qrRendered) {
-        await toCanvas(canvas, $('link-out').value, { width: 240, margin: 1 });
-        qrRendered = true;
-      }
     } else {
       canvas.hidden = true;
       $('qr-toggle').textContent = 'Show QR code';
     }
   });
 
+  // hosted short links (premium): store ciphertext only, get /s/<slug>
+  $('host-btn').addEventListener('click', async () => {
+    $('hosted-err').hidden = true;
+    $('host-btn').disabled = true;
+    try {
+      // Strip any embedded-password tail — it must never reach the server.
+      const { env: envStr } = splitEmbedded(currentLink.str);
+      const body = { envelope: envStr };
+      if ($('adv-burn').checked) body.burn = true;
+      if ($('adv-expiry').value) body.exp = new Date($('adv-expiry').value).toISOString();
+      const res = await fetch('/api/link', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new SealError(data.error || `hosting failed (HTTP ${res.status})`);
+      $('hosted-out').value = data.url;
+      $('hosted-row').hidden = false;
+      $('host-btn').hidden = true;
+    } catch (e2) {
+      $('hosted-err').textContent = e2?.message || String(e2);
+      $('hosted-err').hidden = false;
+    } finally {
+      $('host-btn').disabled = false;
+    }
+  });
+  $('hosted-copy').addEventListener('click', () => {
+    $('hosted-out').select();
+    navigator.clipboard.writeText($('hosted-out').value).catch(() => document.execCommand('copy'));
+    $('hosted-copy').textContent = 'Copied ✓';
+    setTimeout(() => ($('hosted-copy').textContent = 'Copy hosted link'), 1500);
+  });
+
   // advanced
-  for (const id of ['adv-prf', 'adv-pub', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-sign-pq', 'adv-path', 'adv-preview', 'adv-plain']) {
+  for (const id of ['adv-prf', 'adv-pub', 'adv-pw2', 'adv-thr', 'adv-embed', 'adv-sign', 'adv-sign-pq', 'adv-path', 'adv-preview', 'adv-plain', 'adv-burn']) {
     $(id).addEventListener('change', () => {
       refreshAdvancedRows();
       updateAdvancedSummary();
@@ -692,15 +817,32 @@ function bindStatic() {
   });
 }
 
+function readPrefill() {
+  // Prefill travels in the fragment (#prefill=…), which browsers never
+  // send to servers — the destination stays out of request logs. Legacy
+  // ?url= links still work, but they DO reach the host (the Prove page
+  // will show it); integrations emit the fragment form.
+  const m = /^#prefill=(.+)$/.exec(location.hash);
+  if (m) {
+    try {
+      return decodeURIComponent(m[1]);
+    } catch {
+      return m[1];
+    }
+  }
+  return new URLSearchParams(location.search).get('url');
+}
+
 async function init() {
   bindStatic();
   refreshAdvancedRows();
+  checkPremium();
 
   // Warm the deep dictionary cache in the background: first seal/open of a
   // deep link then needs no wait at all.
   ensureDeepDict().catch(() => {});
 
-  const pre = new URLSearchParams(location.search).get('url');
+  const pre = readPrefill();
   if (pre) {
     showView('create');
     $('payload').value = pre;
@@ -710,4 +852,9 @@ async function init() {
   await route();
 }
 
-init();
+init().catch((e) => {
+  // A broken link must never silently land the recipient on the Create
+  // page — show what went wrong in the open view.
+  showView('open');
+  err(e, 'open');
+});

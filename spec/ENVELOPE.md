@@ -276,3 +276,8 @@ may be present for one identity; a hybrid-verifying client should require both.
 - Decoders SHOULD support both compressed and uncompressed envelopes.
 - `meta.exp` is advisory and checked client-side; only premium server mode enforces it.
 - The embedded-password tail is `decodeURIComponent`-ed before use.
+- Decoder resource limits (reference implementation; recommended everywhere):
+  binary readers MUST reject truncated input and trailing bytes; `wrap` count is
+  capped at 64; inflated bodies are capped at 4 MiB; `meta.time.n` above 2⁴² is
+  refused; threshold envelopes require `thr.n = wrap count` and unique
+  `xi ∈ [1, n]`.
