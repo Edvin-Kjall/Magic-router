@@ -37,7 +37,7 @@ import {
   expiryStatus,
   SealError,
 } from '../site/public/lib/envelope.js';
-import { estimateHashRate, formatDuration } from '../site/public/lib/timelock.js';
+import { estimateHashRate, estimateSquaringRate, formatDuration } from '../site/public/lib/timelock.js';
 import { toString as qrTerminal } from 'qrcode';
 import { setDeepTokens, setDeepTokensV1 } from '../site/public/lib/dict.js';
 
@@ -164,7 +164,7 @@ async function cmdCreate(args) {
   }
   if (f.delay) {
     const ms = parseDuration(f.delay);
-    const rate = await estimateHashRate();
+    const rate = await estimateSquaringRate();
     opts.timeLock = await makeTimeLock(ms, rate);
   }
   if (f.expires) opts.expiry = f.expires;
@@ -273,9 +273,10 @@ async function cmdOpen(args, link) {
     if (tail) creds.embeddedPassword = tail;
     const env = await decodeEnvelope(envStr);
     if (env.meta?.time) {
-      const rate = await estimateHashRate();
+      const rate = env.meta.time.N ? await estimateSquaringRate() : await estimateHashRate();
       const eta = formatDuration((env.meta.time.n / rate) * 1000);
-      process.stderr.write(`time-lock: grinding ${env.meta.time.n} hashes (≈ ${eta})...\n`);
+      const what = env.meta.time.N ? 'squarings' : 'hashes';
+      process.stderr.write(`time-lock: grinding ${env.meta.time.n} ${what} (≈ ${eta})...\n`);
     }
     r = await open(envStr, creds);
   }
@@ -311,7 +312,7 @@ async function cmdInfo(args, link) {
       host: d.host,
       note: d.note,
       expires: ex ? { at: ex.at, expired: ex.expired } : null,
-      timeLock: d.time ? { n: d.time.n } : null,
+      timeLock: d.time ? { n: d.time.n, mode: d.time.mode } : null,
       threshold: d.threshold,
       methods: d.methods,
       signed: d.signed,

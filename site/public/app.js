@@ -23,7 +23,7 @@ import {
   isCancelError,
   SealError,
 } from './lib/envelope.js';
-import { estimateHashRate, formatDuration } from './lib/timelock.js';
+import { estimateHashRate, estimateSquaringRate, formatDuration, getRswModulus } from './lib/timelock.js';
 import { toCanvas } from 'qrcode';
 import { ensureDeepDict } from './lib/dict.js';
 
@@ -35,6 +35,7 @@ const CFG = {
 const $ = (id) => document.getElementById(id);
 
 let hashRate = 0;
+let sqRate = 0; // modular squarings/sec — RSW time-lock calibration
 let signerIdentity = null; // { name, ed25519, mldsa65 }
 let currentLink = null; // { str, env?, tail, mode, hostedMeta? }
 let qrRendered = false;
@@ -295,9 +296,9 @@ async function onCreate(e) {
       opts.recipient = JSON.parse(await opts.recipient.text());
     }
     if (tl !== 'off') {
-      // hashRate warms up in the background; if the user seals a time-locked
-      // link before it's ready, measure now rather than assume 1M h/s.
-      const rate = hashRate || (await estimateHashRate().catch(() => 1e6));
+      // sqRate warms up in the background; if the user seals a time-locked
+      // link before it's ready, measure now rather than assume a rate.
+      const rate = sqRate || (await estimateSquaringRate().catch(() => 1e6));
       opts.timeLock = await makeTimeLock(parseDuration(tl), rate);
     }
     if ($('adv-preview').checked) opts.preview = true;
@@ -562,19 +563,21 @@ async function doOpen(envStr, env) {
   $('open-btn').disabled = true;
   $('open-passkey-btn').disabled = true;
   if (tl) {
+    const rate = tl.N ? sqRate : hashRate;
     $('timelock-box').hidden = false;
-    $('timelock-eta').textContent = hashRate
-      ? `about ${formatDuration((tl.n / hashRate) * 1000)}`
+    $('timelock-eta').textContent = rate
+      ? `about ${formatDuration((tl.n / rate) * 1000)}`
       : 'a little while';
   }
   try {
     const r = await open(envStr, creds, {
       onProgress: tl
         ? (done, total) => {
+            const rate = tl.N ? sqRate : hashRate;
             $('timelock-bar').style.width = `${Math.min(100, (done / total) * 100)}%`;
-            if (hashRate) {
+            if (rate) {
               $('timelock-eta').textContent =
-                `about ${formatDuration(((total - done) / hashRate) * 1000)} left`;
+                `about ${formatDuration(((total - done) / rate) * 1000)} left`;
             }
           }
         : undefined,
@@ -849,6 +852,10 @@ async function init() {
   }
 
   estimateHashRate().then((r) => (hashRate = r)).catch(() => {});
+  estimateSquaringRate().then((r) => (sqRate = r)).catch(() => {});
+  // Pre-generate the RSW modulus in the background so the first time-locked
+  // seal doesn't stall on primality testing.
+  getRswModulus().catch(() => {});
   await route();
 }
 

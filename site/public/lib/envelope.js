@@ -8,7 +8,8 @@
 //   - passkey (WebAuthn PRF extension)
 //   - recipient keypair (hybrid X25519 + ML-KEM-768)
 // wrapped as full keys (any one unlocks) or as Shamir shares (m-of-n).
-// Optional: time-lock (sequential SHA-256 chain), signed seals
+// Optional: time-lock (RSW modular-squaring puzzle; legacy links may carry a
+// sequential SHA-256 chain), signed seals
 // (Ed25519 + ML-DSA-65), advisory expiry, destination preview.
 //
 // Isomorphic: browsers (WebCrypto + vendored noble) and Node 20+ (same).
@@ -25,7 +26,7 @@ import {
 import { deriveKey, ARGON2ID } from './kd.js';
 import { aesEncrypt, aesDecrypt, aesEncryptNoIv, aesDecryptNoIv, importAesKey } from './aes.js';
 import { splitSecret, combineShares } from './shamir.js';
-import { hashChain } from './timelock.js';
+import { hashChain, getRswModulus, rswTrapdoor, rswSolve, bigIntToBytes } from './timelock.js';
 import { dictCompressEx, dictDecompress, dictDecompressLegacy, dictDecompressV3, dictCompressDeep, dictDecompressDeep, dictDecompressDeepV1, ensureDeepDict, ensureDeepDictV1, hasDeep } from './dict.js';
 
 export const PREFIX = 's3.';
@@ -394,7 +395,10 @@ function compactEnvelope(env) {
   if (env.meta?.host != null) m.h = env.meta.host;
   if (env.meta?.exp != null) m.e = env.meta.exp;
   if (env.meta?.note != null) m.n = env.meta.note;
-  if (env.meta?.time != null) m.z = { s: env.meta.time.salt, n: env.meta.time.n };
+  if (env.meta?.time != null) {
+    m.z = { s: env.meta.time.salt, n: env.meta.time.n };
+    if (env.meta.time.N != null) m.z.N = env.meta.time.N;
+  }
   if (env.meta?.sig?.length) {
     m.g = env.meta.sig.map((s) => ({ a: s.alg, na: s.name, k: s.pk, s: s.sig }));
   }
@@ -431,7 +435,10 @@ function expandCompact(c, version) {
     if (c.m.h != null) env.meta.host = c.m.h;
     if (c.m.e != null) env.meta.exp = c.m.e;
     if (c.m.n != null) env.meta.note = c.m.n;
-    if (c.m.z != null) env.meta.time = { salt: c.m.z.s, n: c.m.z.n };
+    if (c.m.z != null) {
+      env.meta.time = { salt: c.m.z.s, n: c.m.z.n };
+      if (c.m.z.N != null) env.meta.time.N = c.m.z.N;
+    }
     if (c.m.g != null) env.meta.sig = c.m.g.map((s) => ({ alg: s.a, name: s.na, pk: s.k, sig: s.s }));
   }
   for (const w of c.w || []) {
@@ -544,6 +551,10 @@ function binaryEncode(env) {
     throw new SealError('invalid time-lock round count');
   }
   const timeSalt = m.time != null ? fieldBytes(m.time.salt, 16, 'time-lock salt') : null;
+  const timeN = m.time?.N != null ? fieldBytes(m.time.N, null, 'time-lock modulus') : null;
+  if (timeN != null && (timeN.length < 64 || timeN.length > 512)) {
+    throw new SealError('invalid time-lock modulus — expected a 512–4096-bit RSA modulus');
+  }
   const sigs = m.sig ?? [];
   if (sigs.length > 255) throw new SealError('too many signatures for the link format');
   for (const s of sigs) {
@@ -560,7 +571,7 @@ function binaryEncode(env) {
     if (m.host != null) mf |= 1;
     if (m.exp != null) mf |= 2;
     if (m.note != null) mf |= 4;
-    if (m.time != null) mf |= 8;
+    if (m.time != null) mf |= m.time.N != null ? 32 : 8;
     if (m.sig?.length) mf |= 16;
     out.push(mf);
     if (hostBytes != null) {
@@ -574,6 +585,10 @@ function binaryEncode(env) {
     }
     if (m.time != null) {
       out.push(...numBytes(m.time.n, 6));
+      if (timeN != null) {
+        out.push(...numBytes(timeN.length, 2));
+        pushBytes(out, timeN);
+      }
       pushBytes(out, timeSalt);
     }
     if (sigs.length) {
@@ -667,7 +682,13 @@ function binaryDecode(bytes) {
     if (mf & 1) env.meta.host = toStr(r.bytes(r.u8()));
     if (mf & 2) env.meta.exp = new Date(r.num(6)).toISOString();
     if (mf & 4) env.meta.note = toStr(r.bytes(r.num(2)));
+    if ((mf & 8) && (mf & 32)) throw new SealError('malformed link: bad time-lock');
     if (mf & 8) env.meta.time = { n: r.num(6), salt: bytesToB64u(r.bytes(16)) };
+    if (mf & 32) {
+      const tn = r.num(6);
+      const mod = bytesToB64u(r.bytes(r.num(2)));
+      env.meta.time = { n: tn, N: mod, salt: bytesToB64u(r.bytes(16)) };
+    }
     if (mf & 16) {
       const count = r.u8();
       env.meta.sig = [];
@@ -762,6 +783,17 @@ function validateEnvelope(env) {
     if (t.n > MAX_TIMELOCK_N) {
       throw new SealError('this link claims an unreasonable time-lock — refusing to grind');
     }
+    if (t.N != null) {
+      let nb;
+      try {
+        nb = b64uToBytes(t.N);
+      } catch {
+        nb = null;
+      }
+      if (!nb || nb.length < 64 || nb.length > 512) {
+        throw new SealError('malformed link: bad time-lock modulus');
+      }
+    }
   }
   if (env.thr) {
     const { n, m } = env.thr;
@@ -836,7 +868,10 @@ export function canonicalize(env) {
   if (env.meta?.host != null) meta.host = env.meta.host;
   if (env.meta?.exp != null) meta.exp = env.meta.exp;
   if (env.meta?.note != null) meta.note = env.meta.note;
-  if (env.meta?.time != null) meta.time = { salt: env.meta.time.salt, n: env.meta.time.n };
+  if (env.meta?.time != null) {
+    meta.time = { salt: env.meta.time.salt, n: env.meta.time.n };
+    if (env.meta.time.N != null) meta.time.N = env.meta.time.N;
+  }
   const out = { v: 3, t: env.t, meta };
   if (env.wrap) out.wrap = env.wrap.map(canonicalWrap);
   if (env.thr) out.thr = { n: env.thr.n, m: env.thr.m };
@@ -1214,7 +1249,10 @@ export async function seal(opts = {}) {
     meta.exp = t.toISOString();
   }
   if (note) meta.note = String(note);
-  if (timeLock) meta.time = { salt: timeLock.saltB64 ?? bytesToB64u(timeLock.salt), n: timeLock.n };
+  if (timeLock) {
+    meta.time = { salt: timeLock.saltB64 ?? bytesToB64u(timeLock.salt), n: timeLock.n };
+    if (timeLock.N != null) meta.time.N = timeLock.N;
+  }
 
   const env = { v: VERSION, t: type, meta, wrap: [], payload: {} };
 
@@ -1289,10 +1327,11 @@ export async function seal(opts = {}) {
   }
 
   // Time-lock: the payload key is the wrapped key pushed through a
-  // sequential hash chain. Seal applies it once so the opener's chain
-  // lands on the same value; open() re-applies it (that's the grind).
+  // sequential delay. RSW links (N present) seal instantly via the φ(N)
+  // trapdoor; legacy hash-chain links grind once here so the opener's chain
+  // lands on the same value. open() re-applies it either way.
   let payloadKey = K;
-  if (meta.time) payloadKey = await hashChain(K, b64uToBytes(meta.time.salt), meta.time.n);
+  if (meta.time) payloadKey = await applyTimeLockSeal(K, meta.time);
 
   const key = await importAesKey(payloadKey);
   env.payload = { ct: bytesToB64u(await aesEncryptNoIv(key, await preparePayload(type, data))) };
@@ -1363,14 +1402,21 @@ export async function open(str, creds = {}, opts = {}) {
   }
 
   if (env.meta?.time) {
-    K = await hashChain(K, b64uToBytes(env.meta.time.salt), env.meta.time.n, opts.onProgress);
+    K = await applyTimeLockOpen(K, env.meta.time, opts.onProgress);
   }
 
   const key = await importAesKey(K);
-  const pt = await restorePayload(
-    env.t,
-    await (noIv ? aesDecryptNoIv(key, b64uToBytes(env.payload.ct)) : aesDecrypt(key, b64uToBytes(env.payload.ct)))
-  );
+  let pt;
+  try {
+    pt = await restorePayload(
+      env.t,
+      await (noIv ? aesDecryptNoIv(key, b64uToBytes(env.payload.ct)) : aesDecrypt(key, b64uToBytes(env.payload.ct)))
+    );
+  } catch {
+    // Credential unwrapped but the payload key is wrong — tampered link
+    // (e.g. a forged time-lock modulus) or corrupt ciphertext.
+    throw new SealError('this link failed verification — it may be corrupt or tampered with');
+  }
   const data = toStr(pt);
   return { type: env.t, data, meta: env.meta, env };
 }
@@ -1396,11 +1442,36 @@ export async function openLegacy(blob, password) {
 // -------------------------------------------------------------- helpers
 
 export async function makeTimeLock(targetMs, rate) {
+  const { N } = await getRswModulus();
   return {
     saltB64: bytesToB64u(randomBytes(16)),
     n: Math.max(1, Math.round((targetMs * rate) / 1000)),
+    N: bytesToB64u(bigIntToBytes(N)),
     targetMs,
   };
+}
+
+// Time-lock plumbing: RSW puzzle (N present) vs the legacy sequential
+// hash chain. Both fold the wrapped key with the puzzle output; only RSW
+// has a trapdoor and resists ASIC speedup.
+async function applyTimeLockSeal(K, t) {
+  const salt = b64uToBytes(t.salt);
+  if (t.N == null) return hashChain(K, salt, t.n);
+  const { N, phi } = await getRswModulus();
+  const Nbytes = bigIntToBytes(N);
+  if (bytesToB64u(Nbytes) !== t.N) {
+    throw new SealError('time-lock modulus mismatch — this puzzle was not generated here');
+  }
+  const b = rswTrapdoor(N, phi, t.n);
+  return sha256(concatBytes(K, salt, bigIntToBytes(b, Nbytes.length)));
+}
+
+async function applyTimeLockOpen(K, t, onProgress) {
+  const salt = b64uToBytes(t.salt);
+  if (t.N == null) return hashChain(K, salt, t.n, onProgress);
+  const Nbytes = b64uToBytes(t.N);
+  const b = await rswSolve(Nbytes, t.n, onProgress);
+  return sha256(concatBytes(K, salt, b));
 }
 
 export function describeEnvelope(env) {
@@ -1410,7 +1481,7 @@ export function describeEnvelope(env) {
     host: env.meta?.host ?? null,
     note: env.meta?.note ?? null,
     exp: env.meta?.exp ?? null,
-    time: env.meta?.time ?? null,
+    time: env.meta?.time ? { n: env.meta.time.n, mode: env.meta.time.N != null ? 'rsw' : 'chain' } : null,
     threshold: env.thr ?? null,
     methods,
     signed: (env.meta?.sig || []).map((s) => s.name),

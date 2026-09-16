@@ -30,7 +30,7 @@ enforced expiry, fetch counters, and vanity slugs.
 │       │   ├── kd.js           Argon2id / PBKDF2 key derivation (+ Web Worker offload)
 │       │   ├── aes.js          AES-256-GCM helpers (IV-carrying and IV-less)
 │       │   ├── shamir.js       GF(2^8) Shamir secret sharing (m-of-n)
-│       │   ├── timelock.js     Sequential SHA-256 grind + rate estimation
+│       │   ├── timelock.js     RSW puzzle (modular squaring) + legacy SHA-256 chain + rate estimation
 │       │   └── b64.js          base64url/bytes/hex/UTF-8 helpers
 │       ├── vendor/             esbuild-bundled deps (no CDN at runtime)
 │       │   ├── hash-wasm.js    Argon2id WASM
@@ -112,7 +112,7 @@ plaintext. Still openable.
 | Passkey | WebAuthn PRF (`hmac-secret`); 32 B salt; fragment = key XOR PRF | envelope.js |
 | Recipient keypair | Hybrid X25519 (WebCrypto) + ML-KEM-768 (noble); key = SHA-256("x25519"‖ssX‖"mlkem768"‖ssM) | envelope.js |
 | Thresholds | Shamir over GF(2⁸)/0x11b, per-byte polynomials, share index `xi` | shamir.js |
-| Time-lock | Sequential SHA-256 chain `h_i = H(h_{i-1}‖salt)`, n rounds | timelock.js |
+| Time-lock | RSW puzzle: `b = 2^(2^n) mod N` folded into the payload key; sealer shortcuts via φ(N), opener runs n sequential squarings. Legacy SHA-256 chain links still decode. | timelock.js |
 | Signatures | Ed25519 + optional ML-DSA-65 over canonical serialization (fixed key order, v=3 domain separator) | envelope.js |
 | Payload compression | URL dictionary (core 1-B tokens / extended 3-B / deep 2–3-B) + deflate-raw, flag-byte tiered | dict.js |
 
@@ -120,12 +120,12 @@ plaintext. Still openable.
 
 **Seal (browser/CLI):** payload → optional dict+deflate pre-compression → random K
 encrypts (AES-GCM) → K wrapped once per unlock method (Argon2id / embed / PRF /
-hybrid pub) or Shamir-split for m-of-n → optional time-lock chain on K → optional
+hybrid pub) or Shamir-split for m-of-n → optional RSW time-lock fold on K → optional
 signature → binary-encode → `s6.<b64url>` → URL `/#…` or `/_u/…`.
 
 **Open:** extract fragment → decode envelope → show meta (host preview, note,
 expiry, signatures, threshold) → collect credentials → unwrap K (or reconstruct
-via Shamir) → grind time-lock → AES-GCM open → restore payload → **confirm screen**
+via Shamir) → solve time-lock puzzle → AES-GCM open → restore payload → **confirm screen**
 with Safe Browsing check → `location.replace` to destination (http(s) only).
 
 **Hosted (premium):** `/s/<slug>` page → `GET /api/link/<slug>` → envelope → same
@@ -173,5 +173,5 @@ Obsidian (bundles the real lib). Slack is the only server-side piece (`/api/slac
 2. **Link holder sees:** salt/IV/ciphertext + opt-in public meta (host, note, exp).
 3. **Credential holder:** gets plaintext after confirm screen.
 4. Known limits (documented in SECURITY.md): no revocation for stateless links, no
-   brute-force rate limiting, time-lock is bypassable by patching JS, embedded
-   links are credentials.
+   brute-force rate limiting, time-lock is a hardware-dependent duration not a
+   calendar date, embedded links are credentials.

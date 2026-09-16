@@ -25,7 +25,7 @@ you                      the link                          the server
   - 🪪 **Passkey** — WebAuthn PRF extension (Touch ID / Windows Hello / Android)
   - 🗝️ **Recipient keypair** — hybrid **X25519 + ML-KEM-768** (post-quantum)
 - **m-of-n thresholds** — Shamir-secret-shared key; "needs 2 of 3 credentials".
-- **Time-locks** — sequential SHA-256 grind before the payload opens (fair-use; see SECURITY).
+- **Time-locks** — RSW puzzle (`2^(2^n) mod N`): the wait is bound to the key itself, not a skippable timer (see SECURITY).
 - **Signed seals** — Ed25519 + ML-DSA-65 hybrid signatures; "Sealed by Alice ✅".
 - **Secret text**, not just URLs — tokens, API keys, messages.
 - **Confirm screen + Google Safe Browsing check** — anti-phishing by design, with an
@@ -50,7 +50,7 @@ git clone https://github.com/Edvin-Kjall/Magic-router.git
 cd Magic-router
 npm install
 npm run vendor     # build the local browser bundles (hash-wasm, noble PQ, qrcode)
-npm test           # 69 tests: crypto, thresholds, CLI, signatures, legacy, worker
+npm test           # 72 tests: crypto, thresholds, CLI, signatures, RSW time-lock, worker
 npx wrangler deploy
 ```
 
@@ -124,7 +124,7 @@ docs/PREMIUM.md         the optional stateful tier (ciphertext-only)
 docs/UPGRADES.md        the production-readiness audit and what was done
 docs/INTEGRATIONS.md    bookmarklet / Raycast / iOS / Slack / Obsidian
 integrations/           those integrations
-tests/                  node:test suites (69 tests)
+tests/                  node:test suites (72 tests)
 ```
 
 ## Honest limits
@@ -142,7 +142,7 @@ tests/                  node:test suites (69 tests)
   shared. Premium mode trades a little state for those features.
 - Browsers store full URLs in history and sync them; embedded-password links are
   therefore credentials. Share them accordingly.
-- The time-lock is bypassable by editing the page's JS. It's fair-use, not a vault.
+- The time-lock is a wall-clock duration, not a calendar date — faster hardware opens sooner. The RSW puzzle can't be skipped by editing the page's JS (the grind output feeds the key), but it's still a delay, not a vault.
 
 See [SECURITY.md](SECURITY.md) for the full threat model.
 

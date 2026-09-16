@@ -26,10 +26,13 @@ u8  version (6)
 u8  flags            bit0 type (0=url 1=text) · bit1 hasMeta · bit2 hasThr
 [ meta section if hasMeta:
     u8  flags        bit0 host · bit1 exp · bit2 note · bit3 time · bit4 sig
+                     · bit5 rsw-time
     host: u8 len + utf8
     exp:  u48 unix ms
     note: u16 len + utf8
-    time: u48 n + 16-byte salt
+    time (bit3): u48 n + 16-byte salt                    ← legacy SHA-256 chain
+    rsw-time (bit5): u48 n + u16 nLen + modulus N + 16-byte salt
+                     (bits 3 and 5 are mutually exclusive — both set = malformed)
     sig:  u8 count, then per sig: u8 alg (1=ed25519 2=mldsa65),
           u8 nameLen + utf8, u16 pkLen + pk, u16 sigLen + sig ]
 [ u8 n, u8 m if hasThr ]
@@ -177,7 +180,9 @@ the same signed link verifies whether it was stored as s3 or s4.
                              // destination stays fully encrypted
     "exp": "2026-12-31T00:00:00.000Z",  // advisory expiry (client-checked)
     "note": "…",             // optional public note
-    "time": { "salt": "…", "n": 1000000 },  // time-lock: n sequential SHA-256 rounds
+    "time": { "salt": "…", "n": 1000000, "N": "…" },
+    // time-lock. With "N" (b64u RSA modulus, 512–4096 bit): RSW puzzle —
+    // n sequential squarings of 2 mod N. Without "N": legacy SHA-256 chain.
     "sig": [                 // signed seals (see Signatures)
       { "alg": "ed25519", "name": "alice", "pk": "…", "sig": "…" },
       { "alg": "mldsa65",  "name": "alice", "pk": "…", "sig": "…" }
@@ -195,9 +200,17 @@ All byte strings are base64url-encoded.
 
 - A random 256-bit payload key `K` encrypts the UTF-8 destination/secret:
   `ct = IV(12 random bytes) || AES-256-GCM(K, IV, plaintext)`.
-- With a time-lock, the stored payload key is `K' = H^n(K ‖ salt)` (sequential chain:
-  `h0 = SHA-256(K‖salt)`, `hi = SHA-256(h_{i-1}‖salt)`), and the opener must grind the
-  same chain before decryption. `n` is chosen from a measured hash rate.
+- With a time-lock, the stored payload key is folded with the puzzle output:
+  `K' = SHA-256(K ‖ salt ‖ b)`.
+  - **RSW (current):** `b = 2^(2^n) mod N` as a big-endian byte string of the
+    modulus length. The sealer generated `N = p·q` locally, computes
+    `b = 2^e mod N` with `e = 2^n mod φ(N)` instantly, and ships only `N`, `n`,
+    `salt` — never `p`, `q`, or `b`. The opener must run `n` sequential
+    squarings of 2 mod N; skipping the loop yields a wrong `b`, a wrong `K'`,
+    and an AES-GCM auth failure. `n` is chosen from a measured squaring rate.
+  - **Legacy chain (`N` absent):** `b = H^n(K ‖ salt)` is folded differently —
+    `K' = SHA-256^n(K ‖ salt)` (`h0 = SHA-256(K‖salt)`, `hi = SHA-256(h_{i-1}‖salt)`).
+    Kept so pre-RSW links still open; new links always carry `N`.
 
 ## Key wrappers (`wrap[]`)
 

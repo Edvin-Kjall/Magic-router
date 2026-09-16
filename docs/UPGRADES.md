@@ -16,6 +16,9 @@ the problem, the fix, and status. Everything below has been implemented.
 | E7 | `decodePlainUrl('u0.')` on an empty/garbage body decodes nonsense instead of failing | Guards + wrapped errors → `SealError` | ✅ done |
 | E8 | `seal({expiry: 'junk'})` throws a raw `RangeError` | Wrapped → `SealError('invalid expiry')` | ✅ done |
 | E9 | Time-lock showed an ETA but the progress bar never moved (`#timelock-bar` unwired) | `hashChain` takes `onProgress(done, total)`; browser path yields every 4 096 rounds so the bar paints; `open()` threads it through | ✅ done |
+| E10 | Time-lock was a skippable UI delay — patching the JS opened instantly, and a hash chain invites ASIC speedup | **RSW puzzle:** payload key folded with `b = 2^(2^n) mod N` (1024-bit RSA modulus generated per session, φ(N) never leaves the sealer's memory). Seal is instant via the trapdoor; the opener MUST run `n` sequential squarings — skipping yields a wrong key → AES-GCM auth failure. New meta-flag bit 5 carries `{n, N, salt}` in v6 (`nLen+N` varint field); `{n, salt}` alone still means the legacy chain so old links open. Squaring-rate estimator calibrates `n` and the ETA; modulus is pre-generated in the background at page load | ✅ done |
+| E11 | Tampered time-lock (forged modulus) produced a raw `OperationError` — "The operation failed for an operation-specific reason" | Payload-decrypt failure wrapped in `SealError('this link failed verification…')` | ✅ done |
+| E12 | Hostile RSW parameters: 8192-bit modulus → minutes of BigInt burn per squaring; 64-bit modulus → factorable | Modulus bounded to 512–4096 bits at encode AND decode; malformed `N` fails closed | ✅ done |
 
 ## Worker hardening (`site/worker.js`)
 
@@ -64,7 +67,7 @@ the problem, the fix, and status. Everything below has been implemented.
 | # | Problem | Fix | Status |
 |---|---|---|---|
 | T1 | `node --test "tests/*.test.mjs"` relies on Node ≥21 glob handling — `engines` promises ≥20 | `node --test tests/` (directory form works on Node 20+) in package.json + run-tests.sh | ✅ done |
-| T2 | No coverage for malformed/truncated/oversized envelopes, Slack signature flow, premium protections, hosted CLI open, timelock progress | +19 tests across lib/cli/worker suites (50 → 69) | ✅ done |
+| T2 | No coverage for malformed/truncated/oversized envelopes, Slack signature flow, premium protections, hosted CLI open, timelock progress, RSW round-trip/signatures/hostile moduli | +22 tests across lib/cli/worker suites (50 → 72) | ✅ done |
 | T3 | `site/public/vendor/kd-worker.js` untracked while its siblings are committed | Rebuilt via `npm run vendor`; note for commit | ✅ done |
 
 ## Deliberately NOT done (with reasons)

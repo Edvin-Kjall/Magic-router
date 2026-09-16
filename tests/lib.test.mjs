@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
 
-import { bytesToB64u, b64uToBytes, randomBytes, concatBytes } from '../site/public/lib/b64.js';
+import { bytesToB64u, b64uToBytes, toBytes, randomBytes, concatBytes } from '../site/public/lib/b64.js';
 import { ARGON2ID_FAST } from '../site/public/lib/kd.js';
 import { deriveKey } from '../site/public/lib/kd.js';
 import { aesEncrypt, importAesKey } from '../site/public/lib/aes.js';
@@ -168,7 +168,71 @@ test('time-lock: key only appears after the grind', async () => {
 
 test('makeTimeLock sanity', async () => {
   const tl = await makeTimeLock(5000, 1_000_000);
-  assert.equal(tl.n, 5_000_000); // 5s at 1M hashes/s
+  assert.equal(tl.n, 5_000_000); // 5s at 1M squarings/s
+  assert.equal(typeof tl.N, 'string'); // RSW modulus embedded
+  assert.ok(b64uToBytes(tl.N).length >= 64);
+});
+
+test('RSW time-lock: round trip, and the puzzle output feeds the key', async () => {
+  const tl = await makeTimeLock(1, 50_000); // n = 50 squarings — instant
+  const env = await seal({ type: 'url', data: URL, passwords: ['pw'], timeLock: tl, kdf: KDF });
+  assert.ok(env.meta.time.N, 'RSW modulus must ride in the link');
+  const str = await encodeEnvelope(env);
+  const parsed = await decodeEnvelope(str);
+  assert.equal(parsed.meta.time.N, env.meta.time.N);
+
+  const ticks = [];
+  const r = await open(str, { password: 'pw' }, { onProgress: (d, t) => ticks.push([d, t]) });
+  assert.equal(r.data, URL);
+  assert.deepEqual(ticks.at(-1), [tl.n, tl.n]);
+
+  // wrong password still fails cleanly through the puzzle path
+  await assert.rejects(open(str, { password: 'nope' }), SealError);
+});
+
+test('RSW time-lock survives compact + binary encodings and signing', async () => {
+  const tl = await makeTimeLock(1, 50_000);
+  const id = await generateSignerIdentity('rsw');
+  const env = await seal({
+    type: 'url', data: URL, passwords: ['pw'], timeLock: tl, kdf: KDF, signer: id,
+  });
+  const str = await encodeEnvelope(env); // s6. binary
+  const parsed = await decodeEnvelope(str);
+  assert.equal(parsed.meta.time.N, env.meta.time.N);
+  assert.equal(parsed.meta.time.n, env.meta.time.n);
+  const sigs = await verifySignatures(parsed);
+  assert.ok(sigs.length && sigs.every((s) => s.ok));
+
+  // tampering with the modulus must invalidate signatures
+  const bad = structuredClone(parsed);
+  bad.meta.time.N = bytesToB64u(randomBytes(128));
+  const badSigs = await verifySignatures(bad);
+  assert.ok(badSigs.every((s) => !s.ok));
+
+  // and the payload key comes out wrong anyway: solve against tampered N
+  await assert.rejects(
+    open(await encodeEnvelope(bad), { password: 'pw' }),
+    SealError
+  );
+});
+
+test('RSW: hostile modulus sizes are rejected', async () => {
+  const tl = await makeTimeLock(1, 50_000);
+  for (const nBytes of [8, 1024]) {
+    const env = await seal({ type: 'url', data: URL, passwords: ['pw'], timeLock: tl, kdf: KDF });
+    env.meta.time.N = bytesToB64u(randomBytes(nBytes)); // 64-bit / 8192-bit — both out of range
+    // encode itself refuses to emit the hostile modulus
+    await assert.rejects(encodeEnvelope(env), SealError);
+    // and a hostile *received* link (crafted via the JSON s3. path, which
+    // bypasses binaryEncode) is rejected by validateEnvelope on decode
+    const json = toBytes(JSON.stringify(env));
+    const crafted = 's3.' + bytesToB64u(concatBytes(new Uint8Array([0]), json));
+    await assert.rejects(decodeEnvelope(crafted), SealError);
+  }
+  // corrupt b64 in N fails closed too
+  const env = await seal({ type: 'url', data: URL, passwords: ['pw'], timeLock: tl, kdf: KDF });
+  env.meta.time.N = '!!!';
+  await assert.rejects(encodeEnvelope(env), SealError);
 });
 
 test('signed seals verify; tampered payload invalidates', async () => {
