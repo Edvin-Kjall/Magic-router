@@ -76,8 +76,9 @@ Notes:
   --password may be repeated; each password becomes its own unlock method.
   --embed puts the password in the link itself (auto-open) — the link then
   IS the credential. Treat it accordingly.
-  --delay adds a time-lock: sequential SHA-256 grind before the payload
-  opens. Honest caveat: client-side delay, bypassable by editing the page.
+  --delay adds a time-lock: an RSW puzzle (n sequential squarings mod N)
+  whose output feeds the payload key — skipping it yields a wrong key.
+  Honest caveat: a wall-clock duration, not a calendar date.
   --host + --path emit a path-style URL (/_u/...) — the server sees the
   ciphertext but still cannot decrypt it.
   --store posts the envelope to the host's premium API and prints the short
