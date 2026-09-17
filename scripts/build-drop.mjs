@@ -23,7 +23,7 @@ await build({
 // 2) index.html variant: no import map (no bare specifiers left), no hashes
 // needed (no inline scripts), script src points at bundle.js
 let html = readFileSync('site/public/index.html', 'utf8');
-html = html.replace(/<script type="importmap">[\s\S]*?<\/script>\s*/, '');
+html = html.replace(/<script type="importmap"[^>]*>[\s\S]*?<\/script>\s*/, '');
 html = html.replace(
   '<script type="module" src="/app.js"></script>',
   '<script type="module" src="/bundle.js"></script>'

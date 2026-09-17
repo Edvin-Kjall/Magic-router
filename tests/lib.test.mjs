@@ -866,3 +866,20 @@ test('plain short links strip trackers too (when asked)', async () => {
   const dec2 = await decodePlainUrl(await encodePlainUrl(long, { strip: false }));
   assert.equal(dec2, long);
 });
+
+test('CSP hash covers the inline importmap (drift bricks the whole site)', async () => {
+  // The importmap is an inline script — script-src whitelists it by sha256.
+  // Editing the importmap without re-hashing silently kills every module on
+  // the page (happened once: the site loaded but nothing bound). This test
+  // makes that impossible: recompute and compare.
+  const { createHash } = await import('node:crypto');
+  const { readFileSync } = await import('node:fs');
+  const html = readFileSync(new globalThis.URL('../site/public/index.html', import.meta.url), 'utf8');
+  const body = /<script type="importmap">([\s\S]*?)<\/script>/.exec(html)[1];
+  const hash = 'sha256-' + createHash('sha256').update(body, 'utf8').digest('base64');
+  const csp = /http-equiv="Content-Security-Policy" content="([^"]*)"/.exec(html)[1];
+  assert.ok(
+    csp.includes(hash),
+    `importmap changed — update its CSP hash to ${hash} (sha256 of the script body)`
+  );
+});

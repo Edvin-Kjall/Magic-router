@@ -19,6 +19,9 @@ envelopes — still no passwords, no destinations, nothing decryptable server-si
 
 ## Enable
 
+This instance is already enabled: `PREMIUM = "true"` and the `SEAL_KV`
+binding are in `wrangler.toml`. To stand up your own:
+
 ```bash
 npx wrangler kv namespace create SEAL_KV
 ```
@@ -32,6 +35,30 @@ id = "your-namespace-id"
 ```
 
 Set `PREMIUM = "true"` in `[vars]`, then `npx wrangler deploy`.
+
+## Creation gate (abuse control)
+
+An open `POST /api/link` lets anyone store ciphertext on your instance
+forever. Two optional layers, both configured on this deployment:
+
+- **Turnstile (browser path).** With `TURNSTILE_SECRET` set as a worker
+  secret, the endpoint requires a solved Turnstile token. The frontend
+  lazy-loads the widget (only when someone clicks "Get a short hosted
+  link"), renders it into `#turnstile-slot` with action `host_link`, and
+  sends the token as `turnstile` in the JSON body. The worker verifies via
+  siteverify — `success`, `action === "host_link"`, and `hostname` must be
+  in the `TURNSTILE_HOSTNAMES` allowlist — and fails closed on any error.
+  The public sitekey reaches the page via `/api/health` (`turnstile` field).
+  Widget: `magic-router-hosted-links`, managed mode, registered for the
+  workers.dev host + localhost/127.0.0.1.
+- **`STORE_TOKEN` bearer (CLI path).** A browser widget can't run in a
+  terminal, so CLI `--store` authenticates with `Authorization: Bearer
+  $MR_STORE_TOKEN` instead (`--store-token` flag or `MR_STORE_TOKEN` env).
+  The token only permits storing ciphertext — it can't read or revoke
+  anything. This instance's token lives at `~/.config/magic-router/store-token`.
+
+With neither configured, creation is unauthenticated — functional, but
+anyone can use your KV. Turn that on deliberately, like `ALLOW_REDIRECTS`.
 
 ## API
 
@@ -75,9 +102,10 @@ unlocks exactly like a stateless link.
 - **Revocation is unauthenticated** in this minimal form: anyone who knows the slug
   can `DELETE` it. Slugs are unguessable (8 chars, ~43 bits) but not secret-proof —
   put the instance behind Cloudflare Access or add an API token check if you need it.
-- **Creation is unauthenticated too**: anyone can store ciphertext envelopes on
-  your instance. There is no per-IP rate limit in this minimal form — if that
-  matters, add Turnstile or Cloudflare Access in front of `POST /api/link`.
+- **Deletes are eventually consistent.** KV caches `link:` reads at the edge for
+  up to ~60s, so a revoked (or burned/expired) link can keep resolving for up to a
+  minute after `DELETE` returns. That window is a KV property, not a bug — if a
+  link must die *now*, rotate the destination too.
 - **Fetch counters count envelope fetches**, not successful unlocks — the server
   cannot tell the difference (that's the point).
 - Premium slugs make the link *shorter* and *revocable*, at the cost of the envelope

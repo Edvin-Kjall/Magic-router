@@ -3,6 +3,11 @@
   "short_name": "Magic Router",
   "description": "Encrypted links that store themselves. No database, no tracking.",
   "start_url": "/",
+  "share_target": {
+    "action": "/",
+    "method": "GET",
+    "params": { "title": "title", "text": "text", "url": "url" }
+  },
   "display": "standalone",
   "background_color": "#000000",
   "theme_color": "#000000",

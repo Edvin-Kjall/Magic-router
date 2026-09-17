@@ -170,7 +170,14 @@ test('worker errors become JSON 500s, not HTML', async () => {
 test('health endpoint advertises capabilities', async () => {
   const res = await worker.fetch(new Request('https://x.test/api/health'), { PREMIUM: 'false' });
   const body = await res.json();
-  assert.deepEqual(body, { ok: true, stateless: true, premium: false, redirects: false });
+  assert.deepEqual(body, { ok: true, stateless: true, premium: false, redirects: false, turnstile: null });
+
+  const gated = await worker.fetch(new Request('https://x.test/api/health'), {
+    PREMIUM: 'true',
+    TURNSTILE_SECRET: 'secret',
+    TURNSTILE_SITEKEY: '0xSITEKEY',
+  });
+  assert.equal((await gated.json()).turnstile, '0xSITEKEY');
 });
 
 test('premium: slug conflicts, fetch counting, burn-after-read', async () => {
@@ -197,4 +204,88 @@ test('premium disabled without PREMIUM=true', async () => {
     { PREMIUM: 'false' }
   );
   assert.equal(res.status, 404);
+});
+
+// Turnstile creation gate: stub global fetch (the worker's only outbound
+// call is siteverify) and assert the gate's decisions.
+async function withSiteverify(response, fn) {
+  const real = globalThis.fetch;
+  globalThis.fetch = async (u, opts) => {
+    if (String(u).includes('siteverify')) {
+      if (response instanceof Error) throw response;
+      return new Response(JSON.stringify(response), { status: 200 });
+    }
+    return real(u, opts);
+  };
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = real;
+  }
+}
+
+const gatedEnv = () => ({
+  PREMIUM: 'true',
+  SEAL_KV: mockKV(),
+  TURNSTILE_SECRET: 'ts-secret',
+  TURNSTILE_HOSTNAMES: 'x.test',
+});
+
+test('turnstile gate: no token → 403, valid token → 201', async () => {
+  const env = gatedEnv();
+  const bare = await post(env, { envelope: 's6.AAAA' });
+  assert.equal(bare.status, 403);
+  assert.match((await bare.json()).error, /human check/);
+
+  const verdict = { success: true, action: 'host_link', hostname: 'x.test' };
+  const ok = await withSiteverify(verdict, () => post(env, { envelope: 's6.AAAA', turnstile: 'tok' }));
+  assert.equal(ok.status, 201);
+});
+
+test('turnstile gate: wrong action, wrong hostname, failure, siteverify down → 403', async () => {
+  const env = gatedEnv();
+  for (const verdict of [
+    { success: false, action: 'host_link', hostname: 'x.test' },
+    { success: true, action: 'other_action', hostname: 'x.test' },
+    { success: true, action: 'host_link', hostname: 'evil.example' },
+    { success: true, hostname: 'x.test' }, // missing action
+  ]) {
+    const res = await withSiteverify(verdict, () =>
+      post(env, { envelope: 's6.BBBB', turnstile: 'tok' })
+    );
+    assert.equal(res.status, 403, JSON.stringify(verdict));
+  }
+  const down = await withSiteverify(new Error('network'), () =>
+    post(env, { envelope: 's6.CCCC', turnstile: 'tok' })
+  );
+  assert.equal(down.status, 403); // fail closed on siteverify outage
+});
+
+test('turnstile gate: STORE_TOKEN bearer bypasses, wrong bearer does not', async () => {
+  const env = { ...gatedEnv(), STORE_TOKEN: 's3cret-store' };
+  const authed = await worker.fetch(
+    new Request('https://x.test/api/link', {
+      method: 'POST',
+      headers: { authorization: 'Bearer s3cret-store' },
+      body: JSON.stringify({ envelope: 's6.DDDD' }),
+    }),
+    env
+  );
+  assert.equal(authed.status, 201); // CLI path — no turnstile needed
+
+  const wrong = await worker.fetch(
+    new Request('https://x.test/api/link', {
+      method: 'POST',
+      headers: { authorization: 'Bearer nope' },
+      body: JSON.stringify({ envelope: 's6.EEEE' }),
+    }),
+    env
+  );
+  assert.equal(wrong.status, 403); // falls through to turnstile, no token
+});
+
+test('turnstile gate: no TURNSTILE_SECRET → documented open creation', async () => {
+  const env = { PREMIUM: 'true', SEAL_KV: mockKV() }; // gate not configured
+  const res = await post(env, { envelope: 's6.FFFF' });
+  assert.equal(res.status, 201);
 });

@@ -41,6 +41,11 @@ let signerIdentity = null; // { name, ed25519, mldsa65 }
 let currentLink = null; // { str, env?, tail, mode, hostedMeta? }
 let qrRendered = false;
 let premiumOn = false; // /api/health said this instance can host links
+let turnstileSitekey = null; // /api/health said hosted creation needs a human check
+let tsWidgetId = null; // rendered Turnstile widget (created lazily, reset per attempt)
+let tsResolve = null;
+let tsReject = null;
+let tsLoadPromise = null;
 
 async function checkPremium() {
   try {
@@ -48,9 +53,64 @@ async function checkPremium() {
     if (!res.ok) return;
     const h = await res.json();
     premiumOn = h.premium === true;
+    turnstileSitekey = h.turnstile || null;
   } catch {
     /* static host — no API */
   }
+}
+
+// The Turnstile script loads only when the user actually asks for a hosted
+// link — no third-party JS on the page for anyone who never does.
+function loadTurnstile() {
+  if (window.turnstile) return Promise.resolve();
+  if (!tsLoadPromise) {
+    tsLoadPromise = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+      s.async = true;
+      s.onload = () => resolve();
+      s.onerror = () => reject(new SealError('could not load the human-check widget — check your connection'));
+      document.head.appendChild(s);
+    });
+  }
+  return tsLoadPromise;
+}
+
+// Render once into #turnstile-slot, then reset() per attempt. The callbacks
+// are bound at render time and hand the token to whichever promise is
+// currently pending. Tokens are single-use; we fetch one per POST.
+function getTurnstileToken() {
+  const slot = $('turnstile-slot');
+  slot.hidden = false;
+  if (tsWidgetId == null) {
+    tsWidgetId = window.turnstile.render(slot, {
+      sitekey: turnstileSitekey,
+      action: 'host_link',
+      theme: 'dark',
+      callback: (token) => {
+        slot.hidden = true;
+        const r = tsResolve;
+        tsResolve = tsReject = null;
+        r?.(token);
+      },
+      'error-callback': () => {
+        const r = tsReject;
+        tsResolve = tsReject = null;
+        r?.(new SealError('the human check failed — try again'));
+      },
+      'expired-callback': () => {
+        const r = tsReject;
+        tsResolve = tsReject = null;
+        r?.(new SealError('the human check expired — try again'));
+      },
+    });
+  } else {
+    window.turnstile.reset(tsWidgetId);
+  }
+  return new Promise((resolve, reject) => {
+    tsResolve = resolve;
+    tsReject = reject;
+  });
 }
 
 // ------------------------------------------------------------- helpers
@@ -752,6 +812,11 @@ function bindStatic() {
       const body = { envelope: envStr };
       if ($('adv-burn').checked) body.burn = true;
       if ($('adv-expiry').value) body.exp = new Date($('adv-expiry').value).toISOString();
+      // Creation is human-gated when the instance configures Turnstile.
+      if (turnstileSitekey) {
+        await loadTurnstile();
+        body.turnstile = await getTurnstileToken();
+      }
       const res = await fetch('/api/link', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -834,7 +899,14 @@ function readPrefill() {
       return m[1];
     }
   }
-  return new URLSearchParams(location.search).get('url');
+  const q = new URLSearchParams(location.search);
+  const direct = q.get('url');
+  if (direct) return direct;
+  // Web Share Target: apps often wrap the link in prose via `text`
+  // ("check this out https://…"). Pull the first URL out of it.
+  const text = q.get('text');
+  const found = text && /https?:\/\/\S+/.exec(text);
+  return found ? found[0] : null;
 }
 
 async function init() {

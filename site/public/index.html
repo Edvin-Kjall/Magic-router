@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-91upTlZrgX2HiD61+O4vyhg8kRh74N2en0v/hJKa/rQ=' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-sQPuVF1+YqbMjj7gzxaDf1xxcTvEeMN2WvakWGRNToM=' 'wasm-unsafe-eval' https://challenges.cloudflare.com; style-src 'self'; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; form-action 'self'">
   <meta name="description" content="Encrypted links that store themselves. No database, no tracking — the link carries its own AES-256-GCM encrypted destination.">
   <title>Magic Router — send a link only they can open</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -25,6 +25,9 @@
   <meta name="twitter:description" content="Encrypted links that store themselves. The server never sees a thing.">
   <meta name="twitter:image" content="https://magic-router.uyj4cywb9launwtippwp.workers.dev/og.png">
   <link rel="stylesheet" href="/style.css">
+  <!-- The importmap is inline: external `src` importmaps are not reliably
+       supported. Its exact bytes are covered by the sha256 in the CSP meta
+       tag above — tests/lib.test.mjs recomputes it and fails on drift. -->
   <script type="importmap">
   {
     "imports": {
@@ -98,6 +101,7 @@
           <button id="host-btn" class="text-btn" type="button" hidden>
             Get a short hosted link — the server stores ciphertext only
           </button>
+          <div id="turnstile-slot" hidden></div>
           <p id="hosted-err" class="err" hidden></p>
           <div id="hosted-row" hidden>
             <label class="field">

@@ -84,6 +84,8 @@ Notes:
   ciphertext but still cannot decrypt it.
   --store posts the envelope to the host's premium API and prints the short
   /s/<slug> URL (server stores ciphertext only; needs PREMIUM on the host).
+  Instances that human-gate creation with Turnstile accept the store bearer
+  instead: set MR_STORE_TOKEN or pass --store-token <token>.
   --burn makes the hosted envelope self-delete after one fetch.
   --no-strip keeps tracking parameters (utm_*, fbclid, …) that are stripped
     from the destination by default before encryption.
@@ -103,7 +105,7 @@ function fail(msg) {
 const BOOL_FLAGS = new Set(['json', 'qr', 'path', 'help', 'pq', 'preview', 'store', 'burn', 'no-strip', 'classical']);
 const VALUE_FLAGS = new Set([
   'url', 'text', 'embed', 'recipient', 'threshold', 'delay', 'expires',
-  'note', 'sign', 'out', 'host', 'key', 'words', 'identity', 'slug',
+  'note', 'sign', 'out', 'host', 'key', 'words', 'identity', 'slug', 'store-token',
 ]);
 const PASSWORD_ALIASES = new Set(['password', 'pw', 'pwd']);
 
@@ -198,9 +200,15 @@ async function cmdCreate(args) {
     if (opts.embedded != null) {
       fail('embedded-password links cannot be hosted — the password tail must never reach the server');
     }
+    // Hosted creation is human-gated on instances that run Turnstile — the
+    // CLI authenticates with the store bearer instead (MR_STORE_TOKEN env or
+    // --store-token; the token only permits storing ciphertext).
+    const storeToken = f['store-token'] || process.env.MR_STORE_TOKEN || '';
+    const headers = { 'content-type': 'application/json' };
+    if (storeToken) headers.authorization = `Bearer ${storeToken}`;
     const res = await fetch(f.host.replace(/\/+$/, '') + '/api/link', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers,
       body: JSON.stringify({
         slug: f.slug || undefined,
         envelope: frag,

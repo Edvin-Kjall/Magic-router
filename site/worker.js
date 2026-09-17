@@ -44,6 +44,9 @@ async function route(request, env) {
       stateless: true,
       premium: env.PREMIUM === 'true',
       redirects: env.ALLOW_REDIRECTS === 'true',
+      // Public sitekey — the frontend renders the creation widget when set.
+      turnstile:
+        env.PREMIUM === 'true' && env.TURNSTILE_SECRET ? env.TURNSTILE_SITEKEY || null : null,
     });
   }
 
@@ -187,6 +190,16 @@ async function premiumCreate(request, env, url) {
     return json({ error: 'JSON body required' }, 400);
   }
   if (body == null || typeof body !== 'object') return json({ error: 'JSON object required' }, 400);
+
+  // Creation gate. Storing ciphertext is cheap per request but not free in
+  // aggregate — an unauthenticated store invites abuse, so when
+  // TURNSTILE_SECRET is configured the caller must present a solved widget
+  // token. CLI callers authenticate with the STORE_TOKEN bearer instead
+  // (a browser widget can't run in a terminal). With neither configured,
+  // creation stays open — the documented minimal posture.
+  const allowed = await creationAllowed(request, env, body);
+  if (allowed !== true) return json({ error: allowed }, 403);
+
   const slug = body.slug ?? randomSlug();
   if (typeof slug !== 'string' || !SLUG_RE.test(slug)) {
     return json({ error: 'slug must be 3-64 chars of a-z0-9_-' }, 400);
@@ -240,6 +253,47 @@ async function premiumCreate(request, env, url) {
   await env.SEAL_KV.put('link:' + slug, JSON.stringify(row));
   await env.SEAL_KV.put('meta:' + slug, JSON.stringify({ fetches: 0 }));
   return json({ slug, url: `${env.PUBLIC_HOST || url.origin}/s/${slug}` }, 201);
+}
+
+const TURNSTILE_ACTION = 'host_link';
+
+// Returns true when the caller may create a hosted link, else an error
+// message. Bearer first (CLI), then the Turnstile token from the JSON body
+// (browser). Fail closed on any siteverify problem.
+async function creationAllowed(request, env, body) {
+  const bearer = request.headers.get('authorization')?.replace(/^bearer\s+/i, '') || '';
+  if (env.STORE_TOKEN && bearer && secureCompare(bearer, env.STORE_TOKEN)) return true;
+  if (!env.TURNSTILE_SECRET) return true;
+
+  const token = typeof body.turnstile === 'string' ? body.turnstile : '';
+  const hostnames = String(env.TURNSTILE_HOSTNAMES || '')
+    .split(',')
+    .map((h) => h.trim())
+    .filter(Boolean);
+  if (!token || token.length > 2048 || !hostnames.length) {
+    return 'hosted-link creation needs a human check — reload the page and try again';
+  }
+  let result;
+  try {
+    const r = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      signal: AbortSignal.timeout(10_000),
+      body: new URLSearchParams({
+        secret: env.TURNSTILE_SECRET,
+        response: token,
+        remoteip: request.headers.get('cf-connecting-ip') || '',
+      }),
+    });
+    if (!r.ok) return 'human check failed — try again';
+    result = await r.json();
+  } catch {
+    return 'human check unavailable — try again';
+  }
+  if (!result?.success || result.action !== TURNSTILE_ACTION || !hostnames.includes(result.hostname)) {
+    return 'human check failed — reload and try again';
+  }
+  return true;
 }
 
 async function premiumFetch(env, slug) {

@@ -22,17 +22,26 @@ enabled = true
 head_sampling_rate = 0.01
 
 [vars]
-PREMIUM = "false"
+PREMIUM = "true"
+# Hostnames the Turnstile widget may legitimately report back to siteverify
+# (comma-separated). Local dev hosts go here only if you test locally.
+TURNSTILE_HOSTNAMES = "magic-router.uyj4cywb9launwtippwp.workers.dev"
+# Public sitekey — exposed via /api/health so the frontend can render the
+# widget. Not a secret. The matching secret is a worker secret.
+TURNSTILE_SITEKEY = "0x4AAAAAAE6cpDfuuACwWuk5"
 # PUBLIC_HOST = "https://your-domain.example"   # for Slack links + premium URLs
 # ALLOW_REDIRECTS = "true"  # premium plaintext short-redirect mode (open
                            # redirector — opt in deliberately, see docs/PREMIUM.md)
 
-# --- Optional premium mode (stateful, ciphertext only) ---
-# See docs/PREMIUM.md. Create the namespace, paste its id, uncomment:
-# npx wrangler kv namespace create SEAL_KV
-# [[kv_namespaces]]
-# binding = "SEAL_KV"
-# id = ""
+# --- Premium mode (stateful, ciphertext only) — see docs/PREMIUM.md ---
+[[kv_namespaces]]
+binding = "SEAL_KV"
+id = "fe65d65019564ee5ae6473ca316b3603"
+
+# Secrets (set via `wrangler secret put`, never committed):
+#   TURNSTILE_SECRET  — gates POST /api/link with Cloudflare Turnstile
+#   STORE_TOKEN       — bearer token letting the CLI create hosted links
+#   SLACK_SIGNING_SECRET — Slack slash command
 
 # --- Optional Slack slash command ---
 # npx wrangler secret put SLACK_SIGNING_SECRET
